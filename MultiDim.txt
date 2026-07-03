@@ -1,0 +1,7624 @@
+Genuinely multi-dimensional stationarity preserving
+Finite Volume formulation for nonlinear hyperbolic PDEs
+Wasilij Barsukowa , Mirco Ciallellab , Mario Ricchiutoc , Davide Torlod
+
+arXiv:2506.21700v2 [math.NA] 15 Dec 2025
+
+a
+
+Institut de Mathématiques de Bordeaux, Université de Bordeaux, CNRS UMR 5251, Talence, France
+b
+Laboratoire Jacques-Louis Lions, Université Paris Cité, CNRS UMR 7598, Paris, France
+c
+Centre Inria de l’Université de Bordeaux, CNRS UMR 5251, Talence, France
+d
+Dipartimento di Matematica, Università di Roma La Sapienza, Rome, Italy
+
+Abstract
+Classical Finite Volume methods for multi-dimensional problems include stabilization (e.g.
+via a Riemann solver), that is derived by considering several one-dimensional problems in
+different directions. Such methods therefore ignore a possibly existing balance of contributions coming from different directions, such as the one characterizing multi-dimensional
+stationary states. Instead of being preserved, they are usually diffused away by such methods. Stationarity preserving methods use a better suited stabilization term that vanishes
+at the stationary state, allowing the method to preserve it. This work presents a general
+approach to stationarity preserving Finite Volume methods for nonlinear conservation/balance laws. It is based on a multi-dimensional stationarity preserving quadrature strategy
+that allows to naturally introduce genuinely multi-dimensional numerical fluxes. The new
+methods are shown to significantly outperform existing ones even if the latter are of higher
+order of accuracy and even on non-stationary solutions.
+Keywords: Stationarity preservation, Finite Volume, Multi-dimensional well-balancing,
+Hyperbolic equations, Global flux, residual distribution
+1. Introduction
+This paper focuses on the numerical solution of nonlinear hyperbolic systems of conservation laws in two dimensions:
+∂t q + ∂x f + ∂y g = 0,
+
+(1)
+
+where q, f and g are the vectors of conservative variables and fluxes. Numerical methods for
+hyperbolic partial differential equations (PDEs) need numerical diffusion to achieve entropy
+stability and in order to deal with solutions characterized by strong gradients. The majority
+of numerical methods for multi-dimensional problems, though, are developed following a
+dimension-by-dimension approach, meaning that the numerical diffusion is usually derived
+in a one-dimensional framework and that the diffusion term associated to an edge (or a face,
+in 3D) usually involves only two states. Standard numerical methods with one-dimensional
+Riemann solvers typically introduce a diffusion term of the type
+∂t q + ∂x f + ∂y g = ∆x∂x (νx ∂x q) + ∆y∂y (νy ∂y q),
+
+(2)
+
+where ∆x and ∆y provide the size of the discretization, and νx and νy represent the diffusion
+coefficients, which are often chosen proportional to the spectral radius of the flux Jacobian.
+This one-dimensional approach does not take into account possible multi-dimensional features of the numerical solution, such as the stationary states characterized by a balance of
+contributions coming from different directions [10]. For equation (1), stationary states are
+governed by
+∂x f + ∂y g = 0.
+
+(3)
+
+For classical methods, with the two-dimensional diffusion term designed following one-dimensional
+approaches, the solution will be completely diffused instead of being kept stationary [11, 13].
+In contrast to Equation (3), the discrete stationary states are characterized by the much
+more restrictive conditions ∂x f = 0 and ∂y g = 0. States where ∂x f ̸= 0 is balanced by
+−∂y g is not a stationary state of the numerical method. This can be prevented by choosing
+more sophisticated diffusion operators [46, 52, 34, 45]. Such methods are called stationarity
+preserving [10].
+Typically, solutions to (3) form a very large set; the equations might even be underdetermined, as in the case, for example, in linear acoustics. In that case, they reduce merely
+to the condition that the velocity field must be divergence-free. If the divergence is understood weakly, this operator is not invertible even if all boundary conditions are prescribed.
+Consequently, no numerical method can exactly preserve all stationary states whenever their
+set is so rich. If we consider again the example of linear acoustics, given a finite set of
+point values or averages, it is fundamentally impossible to establish whether they belong to
+a divergence-free vector field or not.
+Stationarity preserving methods guarantee that the stationary states of a numerical
+method are a discretization of all the stationary states of the PDE. The adjective all is
+very important here, and consistency of a numerical method is not enough to guarantee this.
+As shown in [12], an important necessary condition for a method to be stationarity preserving
+is that there exists a finite set of local approximations of (3) that characterize part of the
+kernel of the numerical method. In other words, when these local operators vanish, then
+the consistent part and the numerical dissipation of the numerical method vanish simultaneously. For this condition to be also sufficient, and for the stationary state uniquely defined,
+the number of such approximations should be equal to the total number of unknowns. In
+the context of linear problems, an alternative definition of a stationarity preserving method
+(using the discrete Fourier transform) is given in [10].
+These properties can hardly be obtained in the context of classical methods. As described
+above, all too often the stationary states of a (consistent) numerical method are discretizations of ∂x f = 0 and ∂y g = 0, instead of (3). Consider, as another example, the trivial
+equation ∂t q = 0, which keeps everything stationary. A numerical method that adds diffusion like ∂t q = ∆x∂x2 q will be consistent, but then only those q which are affine in space will
+be stationary states of the numerical method. In this paper, we aim to develop nonlinear
+methods whose stationary states are discretizations of all the stationary states of the PDE,
+while being stable under explicit time integration.
+Recent examples of stationarity preserving diffusion operators were developed for geostrophic equilibria in the linear and nonlinear case [6, 7]. A connection to these equilibria in
+2
+
+the context of low Mach number limit of the Euler equations, which is related to the longtime limit of linear acoustics, was provided in [36, 37] through the preservation of discrete
+divergence with ad-hoc functional spaces. Early examples of stationarity preserving methods
+for nonlinear conservation laws can be found in [9]. So far, however, no general theory for
+the agnostic detection of stationary states of nonlinear multi-dimensional hyperbolic partial
+differential equations is available.
+The method presented in this work exploits an idea formulated in [13], which allows to
+modify the quadrature strategy in a way that systematically leads to a stationarity preserving
+method. This modification is related to a technique often referred to as the global flux method
+[32, 21, 23] initially introduced for hyperbolic balance laws in one dimension,
+∂t q + ∂x f = s,
+
+(4)
+
+with the original goal of developing well-balanced methods [5, 17, 22], and the treatment of
+source terms present in the mathematical model. The global flux has already been successfully
+applied to different contexts and numerical methods [24, 25, 28, 41, 42, 38, 4] to preserve
+one dimensional equilibria. The term “global” is unfortunately misleading. Indeed, quite
+interestingly this approach leads to fully local discretizations (see e.g. [41, 42, 13, 4, 15]), and
+indeed it is related to similar techniques used in the analysis of well balanced and asymptotic
+preserving methods, and referred to as the spatial localization of source terms e.g. in [33]).
+These methods also have very natural connections with the so-called residual distributions
+schemes [3, 1].
+The underlying idea of these techniques is to recast the source term as a flux R:
+Z x
+sdx.
+(5)
+∂x R = s ⇒ R :=
+In this framework, equation (4) can be recast as
+∂t q + ∂x (f − R) = 0,
+
+(6)
+
+where discrete steady states satisfy the relation
+∂x (f − R) = 0 ⇔ f − R ≡ F0 ,
+
+(7)
+
+with F = f − R often referred to as global flux, as it embeds the entire evolution operator,
+and F0 = F (x0 ) for a given x0 in the domain. In the same spirit, a similar approach that
+integrates the Coriolis term into an apparent bathymetry term was also developed in [19].
+The concept of well-balancing is a particular case of the preservation of general stationary
+solutions. The overarching idea is to design numerical schemes in which the artificial diffusion
+vanishes at relevant equilibria. The development of well-balanced schemes in one-dimensional
+problems has reached high levels of maturity in the last decades, but the multi-dimensional
+extensions are often tackled with trivial dimension-by-dimension approaches [24, 26, 44, 41],
+which only allows the preservation of 1D-like equilibria. In [13, 15] some of the present authors
+propose, in the context of stabilized finite elements, a modified quadrature approach that
+allows to guarantee the multi-dimensional stationarity preserving properties of the resulting
+
+3
+
+discretization. The underlying idea has some connections with the above mentioned global
+flux methods. In two space dimensions, it is based on the idea of recasting the problem as
+Z y
+
+∂t q + ∂ x f + ∂ y g = ∂ t q + ∂ y
+∂x f dy + g
+
+
+(8)
+Z x
+= ∂t q + ∂x f +
+∂y g dx = 0.
+By symmetry, one combines the two above formulations, replacing the two-dimensional the
+conservation law (1) with
+∂t q + ∂x f + ∂y g = ∂t q + ∂x ∂y (F + G) = 0,
+
+(9)
+
+by defining
+Z y
+F :=
+
+Z x
+f dy,
+
+G :=
+
+g dx.
+
+(10)
+
+The new divergence operator ∂x ∂y (F +G) now is easy to preserve at the discrete level. Thanks
+to this formulation, it becomes also straightforward to consider multi-dimensional balance
+laws with source terms,
+∂t q + ∂x f + ∂y g = s.
+
+(11)
+
+In this case, the source flux R can be defined as
+Z xZ y
+sdxdy,
+R :=
+
+(12)
+
+and directly included in the modified divergence operator. Setting
+F = F + G − R,
+
+(13)
+
+the multi-dimensional stationarity preserving formulation of the original problem becomes
+again
+∂t q + ∂xy F = 0.
+(14)
+In this work, we present how this idea can be used to design first-order finite volume methods preserving multi-dimensional steady states, not known a priori, for general nonlinear
+hyperbolic PDEs. A thorough analysis of the method is presented for linear problems
+showing a link with other stationarity preserving methods, as well as a discrete energy estimate. The approach proposed here naturally leads to the introduction of nonlinear genuinely
+multi-dimensional fluxes at cell corners, which have been shown to provide fundamental
+enhancements in the numerical solutions, and enjoy many theoretical properties ([31, 12, 1]).
+However, differently from previous works, the formulation proposed here naturally leads to
+corner fluxes, without any hypotheses on the type of quadrature, or on the Riemann fluxes.
+This approach is a starting point for the development of new families of stationarity preserving
+high-order methods based on high-degree polynomial reconstruction [27, 28], or discontinuous Galerkin methods [41, 53]. Throughout the paper, we will refer to the new method as
+4
+
+stationarity preserving formulation or global flux quadrature as in [13, 15]. However, note
+that the discretization is fully local, as we will show in detail.
+The paper is organized as follows. In section 2, we present the examples of PDEs that will
+be considered when assessing the performance of the method experimentally. In section 3,
+we recall the global flux method in a one-dimensional framework for hyperbolic balance laws.
+In section 4, we present the two-dimensional stationarity preserving/global flux quadrature
+approach for hyperbolic PDEs. Here, we discuss the finite volume formulation, the stabilization technique, boundary conditions, the treatment of source terms, as well as stability and
+consistency of the method for a linear model. In section 5, we present the standard finite
+volume method with piecewise constant and piecewise linear reconstructions used for comparison with the global flux method. Several numerical experiments are presented in section
+6 to show the performance of the method. Finally, we draw some conclusions in section 7.
+2. Mathematical models
+The numerical method presented in this work is rather general and, in order to show
+its potential, we exemplify it on several mathematical models described by both linear and
+nonlinear hyperbolic systems. In particular, herein we will focus on three systems: linear
+acoustics, Euler equations for gas dynamics and the shallow water equations. For all of them,
+we focus on two-dimensional problems.
+2.1. Linear acoustic system
+The system of linear acoustic is a simple model that directly embeds non-trivial divergencefree steady states. It can be written in the following 2D and vectorial forms as:
+
+(
+
+= 0,
+∂t u + ∂x p
+∂t v + ∇p
+= 0,
+(15)
+∂t v + ∂y p
+= 0,
+
+∂t p + ∇ · v = 0,
+
+∂t p + ∂x u + ∂y v = 0,
+where p is the pressure and v = (u, v) is the velocity. The system can also be written in the
+compact form (1) with
+ 
+ 
+ 
+u
+p
+0
+q = v  ,
+f = 0 ,
+g = p .
+(16)
+p
+u
+v
+The steady states of this system are given by
+∂t q ≡ 0
+
+⇔
+
+∇ · v ≡ 0 and p ≡ p0 = const.
+
+(17)
+
+2.2. Euler equations
+The Euler equations are a simplification of the full Navier-Stokes system that do not
+include viscosity effects. Their use is widespread for the simulation of compressible gas
+dynamics. The system can be written in vectorial form as:
+
+
+= 0,
+∂t ρ + ∇ · (ρv)
+(18)
+∂t (ρv) + ∇ · (ρv ⊗ v + pI) = 0,
+
+
+∂t (ρE) + ∇ · (ρHv)
+= 0,
+5
+
+having denoted by ρ the density, by v the velocity field, by E = e + ∥v∥2 /2 the specific total
+energy, being e the specific internal energy and I is the identity matrix. Finally, the total
+specific enthalpy is H = h + ∥v∥2 /2, with h = e + p/ρ the specific enthalpy. To close the
+system, we use the classical perfect gas equation of state p = (γ − 1)ρe with γ the constant
+ratio of specific heats (γ = 1.4 for air).
+The nonlinear system of Euler equations can also be recast in the compact form (1) with
+ 
+
+
+
+
+ρ
+ρu
+ρv
+ ρu 
+ρu2 + p
+ ρuv 
+,
+
+,
+ 2
+
+q=
+f
+=
+g
+=
+(19)
+ ρv 
+ ρuv 
+ρv + p .
+ρE
+ρHu
+ρHv
+Steady states of the Euler equations are more complex but, after some manipulations, the
+smooth steady states can be characterized by the following relations:
+∇ · (ρv) = 0,
+
+(ρv · ∇)v + ∇p = 0,
+
+v · ∇H = 0.
+
+(20)
+
+2.3. Shallow water system
+The Saint-Venant or shallow water equations describe the dynamics of hydrostatic free
+surface waves influenced by gravity. This model is valid under the hypothesis of very large
+wavelengths, or very shallow depths, and is applied in various engineering fields, including
+river and estuarine hydrodynamics, urban flood management, and tsunami risk assessment.
+In particular, when working with large scale problems, this simplified model becomes crucial
+to speed-up the computational time.
+The system can be written in vectorial form as:
+(
+∂t h + ∇ · (hv)
+= 0,
+
+(21)
+1
+2
+∂t (hv) + ∇ · hv ⊗ v + 2 gh I = −gh∇b,
+where h is the water height, v the velocity field, b is the bathymetry and g is the gravity
+constant. The system can also be written in the classical compact notation (11) with
+ 
+
+
+
+
+
+
+h
+hu
+0
+hv
+,
+huv
+q = hu ,
+f = hu2 + 21 gh2  ,
+s = −gh∂x b .
+(22)
+g=
+1
+2
+2
+hv
+−gh∂y b
+huv
+hv + 2 gh
+This system admits a large variety of equilibria depending on the interaction between the
+flux and the source. The most studied equilibria in the context of well-balanced methods
+are the so-called “lake at rest” states, which are characterized by a constant free surface
+level η := h + b ≡ η0 and a zero velocity v ≡ 0. However, in the presence of a non-flat
+bathymetry, the system can also admit non-trivial equilibria, which are characterized by a
+non-zero velocity and a non-flat free surface level:
+∇ · (hv) = 0
+
+(v · ∇)v + g∇(h + b) = 0
+
+(23)
+
+Several works have been devoted to the study of these equilibria in one dimension or in
+a quasi-1D framework [43, 41, 26]. In this work, we are interested in truly multi-dimensional
+well-balanced schemes that are capable of preserving all these equilibria at the discrete level.
+6
+
+3. Global flux for 1D balance laws
+In this section, we recall the main principle of the global flux method and its initial usage
+in a 1D framework. Consider a general nonlinear balance law (4) and define a global flux F
+as
+Z x
+F =f−
+sdx,
+(24)
+such that (4) can now be written in a pseudo-conservative form as
+∂t q + ∂x F = 0.
+
+(25)
+
+Steady states given by ∂t q = 0 are equivalently characterized by the condition ∂x F = 0 ⇔
+F ≡ F0 ∈ R.
+In a finite volume framework, the computational
+domain
+Ω is split into N cells and the
+h
+i
+equation (4) is integrated over each cell Ci = xi− 1 , xi+ 1 :
+2
+
+2
+
+c 1 −F
+c 1
+F
+d
+i+ 2
+i− 2
+q̄i +
+= 0,
+dt
+∆x
+
+(26)
+
+where the cell average is defined as
+1
+q̄i :=
+∆x
+
+Z x
+
+i+ 1
+2
+
+q dx.
+
+(27)
+
+xi− 1
+2
+
+c 1 is considered to be a function of the two values of the global
+The numerical global flux F
+i+ 2
+R
+L
+and
+F
+reconstructed
+at both sides of interface xi+ 1 . For piecewise constant
+flux Fi+
+1
+i+ 1
+2
+
+2
+
+2
+
+L
+R
+reconstructions of the global flux one simply has Fi+
+= Fi+1 .
+1 = Fi and F
+i+ 1
+2
+
+2
+
+Remark 1 (Numerical global flux). It is important to underline that structure preservation
+c 1 is constant ∀ i at steady state. That
+can only be achieved if the interface global flux F
+i+ 2
+implies that numerical dissipation should also vanish in correspondence of this state. Unless
+this condition is imposed with some ad hoc modification (see e.g. [4]), this is only possible if
+the numerical dissipation depends only on global fluxes {Fj }j∈Z in the cells, and not on the
+values {qj }j∈Z of the conservative variables. This is due to the fact that, at equilibria, only
+global fluxes are constant while conservative variables may vary.
+In our previous work [28], we employed the following upwind flux:
+c 1 = 1+ F L 1 + 1− F R 1
+F
+i+
+i+
+i+
+2
+
+2
+
+where 1± := L−1
+
+2
+
+1 ± sign Λ
+L,
+2
+
+(28)
+
+where L is the matrix of left eigenvectors of the flux Jacobian ∂q f , and sign Λ is the diagonal
+matrix of the sign of the eigenvalues of the flux Jacobian, evaluated using any (average) state
+at the interface1 .
+In principle, therefore, one should write 1±
+to make clear that they differ from interface to interface;
+i+ 12
+we do not make this depends explicit to ensure readability
+1
+
+7
+
+Rx
+For the development of the global flux method, a consistent approximation of R :=
+s dx
+is necessary to define F = f − R. This integral can be computed in a recursive manner,
+starting from the beginning of the domain, by integrating the source in each element. To
+simplify the description of the method, we will assume that q and s are constant in each cell,
+therefore the source integral can be computed as
+Z xi−1
+Z xi
+Z x 1
+i− 2
+∆x
+∆x
+Ri :=
+s dx +
+s dx +
+s̄i−1 +
+s̄i .
+(29)
+s dx = Ri−1 +
+2
+2
+xi−1
+xi− 1
+| {z }
+2
+Ri−1
+
+Hence, the global flux will now depend on both the conservative flux and the source term
+Fi = f (q̄i ) − Ri = f (q̄i ) − Ri−1 −
+
+∆x
+(s̄i−1 + s̄i ).
+2
+
+(30)
+
+Similarly, the recursive procedure gives us the following values for Fi−1 and Fi+1 :
+Fi−1 = f (q̄i−1 ) − Ri−1 ,
+
+(31)
+
+Fi+1 = f (q̄i+1 ) − Ri−1 − ∆x
+
+
+
+
+
+1
+1
+s̄i−1 + s̄i + s̄i+1 .
+2
+2
+
+(32)
+
+It can be noticed that, when considering a simple numerical flux
+c 1 (Fi , Fi+1 ) = Fi
+F
+i+
+
+(33)
+
+Fi − Fi−1
+f (q̄i ) − f (q̄i−1 ) s̄i + s̄i−1
+d
+q̄i = −
+=−
++
+,
+dt
+∆x
+∆x
+2
+
+(34)
+
+2
+
+equation (26) can be recast as
+
+which shows already a difference with respect to the classical finite volume method, where
+the source term would be treated in a centered way.
+When the upwind numerical flux (28) is used, one has (having temporarily made the
+dependence of 1± on the interface explicit)
+1−
+f (q̄i+1 ) + (1+
++ 1−
+)f (q̄i ) − 1+
+f (q̄i−1 )
+d
+i+ 12
+i+ 12
+i− 12
+i− 21
+q̄i = −
+(35)
+dt
+∆x
+s̄i + s̄i−1
+s̄i + s̄i−1
++ (1+
++ 1−
+− 1−
+)
++ 1−
++ (1+
++ 1−
+− (1+
++ 1−
+))Ri−1 ,
+1
+i+ 12
+i− 12
+i+
+i+ 12
+i+ 12
+i− 12
+i− 21
+i+ 12
+2
+2
+2
+|
+{z
+} |
+{z
+}
+=1
+
+=1
+
+where the contribution from Ri−1 cancels out even if 1± depend on the interface, since they
+nevertheless add up to 1 on each of them.
+Remark 2 (Compactness of global fluxes). It can be noticed that, although the global flux
+in (30) is defined globally with Ri−1 that depends on previous values, the time residual (34)
+
+8
+
+shows that the stencil is actually compact due to the cancellation of these terms. In particular,
+simple manipulations show that the above upwind method can be also written as
+c 1 − F i Fi − F
+c 1
+F
+d
+i+ 2
+i− 2
+q̄i = −
+−
+dt
+∆x
+∆x
+−
+1i+1/2 (Fi+1 − Fi ) 1+
+i−1/2 (Fi − Fi−1 )
+=−
+−
+∆x 
+
+
+∆x
+f (q̄i ) − f (q̄i−1 ) s̄i + s̄i−1
+f (q̄i+1 ) − f (q̄i ) s̄i+1 + s̄i
++
+−
+−
+− 1i−1/2
+−
+= −1i+1/2
+∆x
+2
+∆x
+2
+which is the well known upwind splitting method dating back to the early works by P.L. Roe
+[51], and later on Bermudez and Vazquez [16]. In the multidimensional case, a full analogy
+with compact residual distribution methods on a dual cell is presented later in section 4.5.
+4. Stationarity preserving formulation for multi-dimensional hyperbolic PDEs
+4.1. Numerical method
+When dealing with multi-dimensional conservation laws, non-trivial equilibria arise also
+in absence of a source term in the equation. For steady states ∂t q = 0, it is no longer just
+∂x f = 0 that follows, but instead the divergence ∂x f + ∂y g = 0, which in general might have
+many solutions.
+To design stationarity preserving finite volumes schemes, we start by rewriting (1) as (9)
+using the definitions in (10) to obtain
+∂t q + ∂xy F = 0.
+
+(36)
+
+where, by analogy with the one dimensional case, we refer to F := F + G as a global flux,
+accounting for both contributions of the fluxes in the x and y direction (and later of the
+source term).
+h
+i h
+i
+Integration of (14) over the cell Ci,j = xi− 1 , xi+ 1 × yj− 1 , yj+ 1 yields
+2
+
+∆x∆y
+
+2
+
+2
+
+2
+
+d
+q̄i,j + F (t, xi+ 1 , yj+ 1 ) − F (t, xi− 1 , yj+ 1 ) − F (t, xi+ 1 , yj− 1 ) + F (t, xi− 1 , yj− 1 ) = 0,
+2
+2
+2
+2
+2
+2
+2
+2
+dt
+(37)
+
+where the cell average is defined as
+1
+q̄i,j :=
+∆x∆y
+
+Z x
+
+1
+i+ 2
+
+xi− 1
+
+2
+
+Z y
+
+j+ 1
+2
+
+q dxdy.
+
+yj− 1
+2
+
+From (37), we see that with this new formulation leads to the introduction of the numerical
+c 1 1 that then allow to write the evolution equation as
+corner fluxes F
+i± ,j±
+2
+
+2
+
+c 1 1 −F
+c 1 1 −F
+c 1 1 +F
+c 1 1
+F
+d
+i+ 2 ,j+ 2
+i− 2 ,j+ 2
+i+ 2 ,j− 2
+i− 2 ,j− 2
+q̄i,j +
+= 0.
+dt
+∆x∆y
+9
+
+(38)
+
+Ci−1,j+1
+
+Ci,j+1
+
+Ci+1,j+1
+
+Ci−1,j
+
+Ci,j
+
+Ci+1,j
+
+Ci−1,j−1
+
+Ci,j−1
+
+Ci,j+1
+
+Ci+1,j+1
+
+Ci,j
+
+Ci+1,j
+
+Ci+1,j−1
+
+(a) Main grid
+
+(b) Dual grid
+
+Figure 1: Cell labeling for the 2D grid.
+
+Recall that the global flux F accounts for contributions of the physical fluxes in all spatial
+directions, as well as of the source, see equations (10), (12), and (13). In practice, the
+transversally integrated fluxes F and G are computed via quadrature along, respectively, the
+y and x directions in a 1D fashion. In particular, the value of Fi in the barycenter of a given
+cell i can be computed recursively starting from the beginning of the domain, similarly to
+section 3, as
+Z yj
+Z yj−1
+∆y
+f dy = Fi,j−1 +
+(fi,j−1 + fi,j ),
+∀i,
+f dy +
+Fi,j =
+(39)
+2
+yj−1
+where, for a first order method, trapezoidal rule is accurate enough. Similarly, Gi can be
+computed as
+Z xi−1
+Z xi
+∆x
+Gi,j =
+g dx +
+g dx = Gi−1,j +
+(gi−1,j + gi,j ),
+∀j.
+(40)
+2
+xi−1
+When dealing with hyperbolic PDEs with source terms,
+R x R y as for the shallow water equations
+in section 2.3, the integral of the source term R :=
+s dxdy can also be embedded into
+the global flux. Similarly, R can be recursively defined as
+Ri,j = Ri−1,j + Ri,j−1 − Ri−1,j−1 +
+
+∆x∆y
+(si−1,j−1 + si−1,j + si,j−1 + si,j ) ,
+4
+
+(41)
+
+for every i, j. The treatment of source terms can be implemented through the compact
+version of this formula, which involves only local source values, that does not use recursion,
+and can be found in section 4.3. More details about the treatment of source terms for the
+shallow water equations 2.3, are given in section 4.6.
+4.2. Numerical corner fluxes
+The conservative formulation obtained using global fluxes (38) requires the definition
+of numerical corner fluxes to update cell averages. This definition is better achieved by
+
+10
+
+considering the evolution of all the cells neighboring a given node. To this end it is preferable
+to recast (38) as
+c(i,j)
+c(i,j)
+c(i,j)
+c(i,j)
+F
++F
++F
++F
+d
+i+ 12 ,j+ 12
+i− 21 ,j+ 12
+i+ 12 ,j− 12
+i− 12 ,j− 12
+q̄i,j +
+= 0.
+dt
+∆x∆y
+
+(42)
+
+where we have added the superscript (i,j) to account for the fact that the signs used in the
+formula involve the flux balance for q̄i,j . They thus are interpreted as depending on the
+orientation of the corner normal for the four cells (i + ℓ, j + r) for ℓ, r ∈ {0, 1} with respect
+to the corner (i + 21 , j + 12 ), defined by
+
+
+(−1)ℓ+1
+(i+ℓ,j+r)
+ni+ 1 ,j+ 1 :=
+, i.e.,
+(43)
+(−1)r+1
+2
+2
+ 
+ 
+ 
+ 
+−1
+1
+−1
+1
+(i,j)
+(i+1,j)
+(i,j+1)
+(i+1,j+1)
+ni+ 1 ,j+ 1 :=
+, ni+ 1 ,j+ 1 :=
+, ni+ 1 ,j+ 1 :=
+, ni+ 1 ,j+ 1 :=
+.
+(44)
+−1
+−1
+1
+1
+2
+2
+2
+2
+2
+2
+2
+2
+Thus ncp is a normal at corner p pointing into cell c. Corner normals and corner fluxes
+alongside a modified concept of conservation associated to corners rather than edges are used
+e.g. in [12] for general polygonal grids, where they are shown to be crucial for structure
+preservation. There, corner normals are defined as the average of the two edge-normals
+adjacent to the node, scaled with the respective edge lengths. We believe that the definition
+above is sufficient in the context of Cartesian meshes.
+(i+ℓ,j+r)
+We further define the scalar ni+ 1 ,j+ 1 as
+2
+
+(i+ℓ,j+r)
+
+2
+
+(i+ℓ,j+r)
+
+ni+ 1 ,j+ 1 = n(ni+ 1 ,j+ 1 ) = (−1)ℓ+1 (−1)r+1 = (−1)ℓ+r ,
+2
+
+2
+
+2
+
+(45)
+
+2
+
+where n(n) := nx ny is the product of the two components.
+The reinterpreted definition of the corner fluxes above requires a different setting compared to the classical one, and appears in the context of genuinely multi-dimensional Riemann
+solvers using more than two states as input (see e.g. [8, 30, 31, 1] and references therein).
+Next, we aim at defining the notion of the numerical global flux in the multi-dimensional
+context as generally as possible. Then, we elucidate the conditions imposed on the functional
+form of the numerical flux by consistency, conservation, and preservation of steady states.
+We define the numerical corner fluxes at the corner (i + 12 , j + 21 ) with respect to the four
+cells (i + ℓ, j + r) with ℓ, r ∈ {0, 1} as
+c(i+ℓ,j+r)
+c(Fi,j , Fi,j+1 , Fi+1,j , Fi+1,j+1 ; q̄i,j , q̄i,j+1 , q̄i+1,j , q̄i+1,j+1 |n(i+ℓ,j+r)
+F
+=F
+).
+i+ 1 ,j+ 1
+i+ 1 ,j+ 1
+2
+
+2
+
+2
+
+2
+
+We can now formulate local consistency as
+c(F , F , F , F ; q, q, q, q|n) = F n(n).
+F
+
+(46)
+
+A stronger property is the steady state preservation requirement which can be expressed as
+c(F , F , F , F ; q̄i,j , q̄i,j+1 , q̄i+1,j , q̄i+1,j+1 |n(i,j)1 1 ) = F n(i,j)1 1 .
+F
+i+ ,j+
+i+ ,j+
+2
+
+11
+
+2
+
+2
+
+2
+
+(47)
+
+Remark 3 (Steady state subspace). Following [13], it will be shown below that steady state
+preservation may be actually already proven if
+∗
+Fi,j
+= F + α i + βj
+
+(48)
+
+for any two data distributions α and β, such that α only depends on i and β only on j. In
+this case, a conservation property more general of (47) reads
+(i,j)
+(i,j)
+∗
+∗
+∗
+∗
+c(i,j)
+F
+(Fi,j
+, Fi,j+1
+, Fi+1,j
+, Fi+1,j+1
+; q̄i,j , q̄i,j+1 , q̄i+1,j , q̄i+1,j+1 |ni+ 1 ,j+ 1 ) = F ni+ 1 ,j+ 1 .
+i+ 1 ,j+ 1
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+(49)
+This condition will be used also in the consistency analysis of Section 4.5.
+Conservation cannot be expressed by face in this framework, as in standard finite volume
+methods. It is instead formulated at corners as follows:
+c(i+1,j)
+c(i,j+1)
+c(i+1,j+1)
+c(i,j)
++F
++F
++F
+= 0.
+F
+i+ 1 ,j+ 1
+i+ 1 ,j+ 1
+i+ 1 ,j+ 1
+i+ 1 ,j+ 1
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+(50)
+
+2
+
+Having established the necessary conditions that the numerical global fluxes have to
+satisfy, we next propose a particular choice. As in [31], we define numerical global fluxes as
+the sum of a consistent central flux plus a diffusion term D. In the present paper, corner
+fluxes are obtained extending to quadrilaterals the multi-dimensional Osher-Solomon flux
+proposed in [31], and combining it with the recent work [13] on stationarity preserving,
+global flux quadrature SUPG stabilization. We define the numerical corner flux around the
+corner (xi+ 1 , yj+ 1 ), which involves the cells Ci,j , Ci+1,j , Ci,j+1 and Ci+1,j+1 (see figure 1).
+2
+2
+The same principle is applied to the other corners. We set
+(i,j+1)
+(i,j+1)
+c(i,j+1)
+F
+= F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 + Di+ 1 ,j+ 1 ,
+i+ 1 ,j+ 1
+
+(i+1,j+1)
+(i+1,j+1)
+c(i+1,j+1)
+F
+= F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 + Di+ 1 ,j+ 1 ,
+i+ 1 ,j+ 1
+
+(i,j)
+(i,j)
+c(i,j)
+F
+= F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 + Di+ 1 ,j+ 1 ,
+i+ 21 ,j+ 12
+2
+2
+2
+2
+2
+2
+
+(i+1,j)
+(i+1,j)
+c(i+1,j)
+F
+= F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 + Di+ 1 ,j+ 1 ,
+i+ 12 ,j+ 12
+2
+2
+2
+2
+2
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+(51)
+where
+
+1
+F i+ 1 ,j+ 1 = (Fi,j + Fi+1,j + Fi+1,j+1 + Fi,j+1 )
+2
+2
+4
+is the average of the global fluxes at the corner.
+To define the numerical dissipation we consider corner dual cells, as depicted on the right
+on figure 1. The conservation condition (50) requires that
+(i,j)
+
+(i+1,j)
+
+(i,j+1)
+
+(i+1,j+1)
+
+Di+ 1 ,j+ 1 + Di+ 1 ,j+ 1 + Di+ 1 ,j+ 1 + Di+ 1 ,j+ 1 = 0.
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+To define the corner dissipation, we cannot proceed as in [31], since this would break the
+stationarity preserving property. Instead, we take inspiration from the streamline upwind
+stabilization (SUPG), studied in the global flux context in [13]. To this end, on the dual cell
+e 1 1 we compute SUPG stabilizing terms
+C
+i+ ,j+
+2
+
+2
+
+(i+ℓ,j+r)
+f 1 1 , q̄ 1 1 |n(i+ℓ,j+r)
+Di+ 1 ,j+ 1 :=D(F
+)
+i+ 2 ,j+ 2
+i+ 2 ,j+ 2
+i+ 12 ,j+ 12
+2
+2
+
+
+Z
+1 x
+1 y
+f 1 1 dξdη,
+=α∆
+J ∂ξ φℓ,r +
+J ∂η φℓ,r ∂ξη F
+i+ 2 ,j+ 2
+∆x
+∆y
+e 1
+C
+1
+i+ 2 ,j+ 2
+
+12
+
+(52)
+
+f 1 1 is a bi-linear Q1 reconstruction of the global flux on the dual cell from the four
+where F
+i+ 2 ,j+ 2
+adjacent values Fi,j , Fi+1,j , Fi,j+1 , Fi+1,j+1 . Here, J x and J y are the Jacobians √
+of the fluxes
+q
+
++q
+
++q
+
+∆x2 +∆y 2
+
++q
+
+i+1,j+1
+√
+f and g computed in the average value q̄i+ 1 ,j+ 1 = i,j i+1,j i,j+1
+is
+. ∆=
+4
+2
+2
+2
+the characteristic mesh size, and α = 1/λm with λm the maximal spectral radius of the flux
+Jacobians computed with the average state of the four reconstructed values at the corner.
+The φℓ,r for ℓ, r ∈ {0, 1} in the above definition are the standard bi-linear finite element basis
+e defined by
+functions on the quadrilateral C
+
+1
+φℓ,r (ξ, η) = (1 + (−1)ℓ+1 ξ)(1 + (−1)r+1 η),
+4
+
+(53)
+
+1
+1
+φ0,0 (ξ, η) = (1 − ξ)(1 − η), φ1,0 (ξ, η) = (1 + ξ)(1 − η)
+4
+4
+1
+1
+φ0,1 (ξ, η) = (1 − ξ)(1 + η), φ1,1 (ξ, η) = (1 + ξ)(1 + η)
+4
+4
+
+(54)
+
+i.e.,
+
+on the reference element ξ, η ∈ [−1, 1]. With this, we can explicitly evaluate the streamline
+upwind dissipation terms as
+
+
+α∆
+n
+n
+x
+y
+x
+y
+f, q̄|n) =
+f),
+D(F
+J +
+J Φ(F
+(55)
+4
+∆x
+∆y
+i.e.,
+
+Jy
+Jx
++
+−
+Φi+ 1 ,j+ 1 ,
+2
+2
+∆x ∆y
+
+
+α∆
+Jx
+Jy
+(i,j)
+Di+ 1 ,j+ 1 =
+−
+−
+Φi+ 1 ,j+ 1 ,
+2
+2
+2
+2
+4
+∆x ∆y
+
+α∆
+(i,j+1)
+Di+ 1 ,j+ 1 =
+2
+2
+4
+
+
+
+Jy
+Jx
++
++
+Φi+ 1 ,j+ 1 ,
+2
+2
+∆x ∆y
+
+
+α∆
+Jx
+Jy
+(i+1,j)
+Di+ 1 ,j+ 1 =
++
+−
+Φi+ 1 ,j+ 1 ,
+2
+2
+2
+2
+4
+∆x ∆y
+(56)
+
+
+
+α∆
+(i+1,j+1)
+Di+ 1 ,j+ 1 =
+2
+2
+4
+
+and where Φi+ 1 ,j+ 1 is the dual cell residual
+2
+
+2
+
+f 1 1 ) := Fi+1,j+1 − Fi,j+1 − Fi+1,j + Fi,j =
+Φi+ 1 ,j+ 1 := Φ(F
+i+ ,j+
+2
+
+2
+
+2
+
+2
+
+Z
+
+f 1 1 dxdy .
+∂xy F
+i+ ,j+
+
+e 1
+C
+i+ ,j+ 1
+2
+
+2
+
+2
+
+2
+
+(57)
+The next sections are devoted to the analysis of some properties of the scheme obtained
+with the above definitions, as well as some enhancements.
+
+13
+
+4.3. Compactness of the method
+Taking into account only the central flux, without the diffusion, one obtains
+c(i,j)
+c(i,j)
+c(i,j)
+c(i,j)
+F
++F
++F
++F
+d
+i+ 12 ,j+ 12
+i− 21 ,j+ 12
+i+ 12 ,j− 12
+i− 12 ,j− 12
+q̄i,j = −
+dt
+∆x∆y
+(i,j)
+
+=−
+
+(58a)
+
+(i,j)
+
+(i,j)
+
+(i,j)
+
+F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 + F i− 1 ,j+ 1 ni− 1 ,j+ 1 + F i+ 1 ,j− 1 ni+ 1 ,j− 1 + F i− 1 ,j− 1 ni− 1 ,j− 1
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+∆x∆y
+(58b)
+
+=−
+
+F i+ 1 ,j+ 1 − F i− 1 ,j+ 1 − F i+ 1 ,j− 1 + F i− 1 ,j− 1
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+∆x∆y
+
+2
+
+2
+
+.
+
+(58c)
+
+Define
+1
+F i+ 1 ,j+ 1 = (Fi,j + Fi+1,j + Fi,j+1 + Fi+1,j+1 )
+2
+2
+4
+1
+Gi+ 1 ,j+ 1 = (Gi,j + Gi+1,j + Gi,j+1 + Gi+1,j+1 )
+2
+2
+4
+1
+Ri+ 1 ,j+ 1 = (Ri,j + Ri+1,j + Ri,j+1 + Ri+1,j+1 )
+2
+2
+4
+
+(59)
+(60)
+(61)
+
+such that F i+ 1 ,j+ 1 = F i+ 1 ,j+ 1 + Gi+ 1 ,j+ 1 + Ri+ 1 ,j+ 1 , and use the recursions (39)–(40) to
+2
+2
+2
+2
+2
+2
+2
+2
+obtain
+F i+ 1 ,j+ 1 − F i+ 1 ,j− 1 =
+2
+
+2
+
+2
+
+2
+
+∆y
+∆y
+(fi+1,j+1 + 2fi+1,j + fi+1,j−1 ) +
+(fi,j+1 + 2fi,j + fi,j−1 ). (62)
+8
+8
+
+We find an analogous formula for F i− 1 ,j+ 1 − F i− 1 ,j− 1 . The element source contribution is
+2
+2
+2
+2
+given from recursion (41) and it reads:
+Ri+ 1 ,j+ 1 − Ri− 1 ,j+ 1 − Ri+ 1 ,j− 1 + Ri− 1 ,j− 1 =
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+∆x∆y
+(si+1,j+1 + 2si+1,j + si+1,j−1 + 2si,j+1 + 4si,j + 2si,j−1 + si−1,j+1 + 2si−1,j + si−1,j−1 ) ,
+16
+(63)
+such that in the end
+1
+1
+d
+q̄i,j = −
+⟨[[f·,· ]]i ⟩j −
+[[⟨g·,· ⟩i ]]j + ⟨s·,· ⟩i j
+dt
+∆x
+∆y
+
+(64)
+
+with the average and jump operators on the cells defined by
+1
+⟨ai,· ⟩j := (ai,j+1 + 2ai,j + ai,j−1 ),
+4
+1
+[[ai,· ]]j := (ai,j+1 − ai,j−1 ).
+2
+
+(65)
+(66)
+
+One observes that all the global fluxes drop out and the central part of the method is local.
+14
+
+Next, we turn to the numerical stabilization. Defining
+ΦFi+ 1 ,j+ 1 = Fi+1,j+1 − Fi,j+1 − Fi+1,j + Fi,j ,
+
+(67)
+
+= Gi+1,j+1 − Gi,j+1 − Gi+1,j + Gi,j ,
+ΦG
+i+ 1 ,j+ 1
+
+(68)
+
+ΦR
+= Ri+1,j+1 − Ri,j+1 − Ri+1,j + Ri,j
+i+ 1 ,j+ 1
+
+(69)
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+such that Φi+ 1 ,j+ 1 = ΦFi+ 1 ,j+ 1 +ΦG
++ΦR
+, and using again the recursions (39)–(40),
+i+ 21 ,j+ 12
+i+ 12 ,j+ 21
+2
+2
+2
+2
+one obtains for every i, j
+ΦFi+ 1 ,j+ 1 =
+
+∆y
+(fi+1,j+1 + fi+1,j − fi,j+1 − fi,j ).
+2
+
+(70)
+
+ΦG
+=
+i+ 1 ,j+ 1
+
+∆x
+(gi+1,j+1 + gi,j+1 − gi+1,j − gi,j ).
+2
+
+(71)
+
+∆x∆y
+(si+1,j + si+1,j+1 + si,j + si,j+1 ) .
+4
+
+(72)
+
+2
+
+2
+
+Analogously,
+
+2
+
+2
+
+and
+=
+ΦR
+i+ 1 ,j+ 1
+2
+
+2
+
+One observes again that all the global fluxes drop out and this shows that the method is
+completely compact/local with a stencil 3 × 3.
+The Jacobians involved in the update of qi,j are evaluated at the four corners, such that
+the method with only the numerical stabilization reads
+(i,j)
+
+(i,j)
+
+(i,j)
+
+(i,j)
+
+Di+ 1 ,j+ 1 + Di− 1 ,j+ 1 + Di+ 1 ,j− 1 + Di− 1 ,j− 1
+d
+2
+2
+2
+2
+2
+2
+2
+2
+q̄i,j = −
+dt
+∆x∆y
+"
+!
+!
+y
+y
+x
+x
+Ji+
+Ji−
+Ji−
+Ji+
+1
+1
+1
+1
+1
+1
+1
+1
+1 α∆
+,j+
+,j+
+,j+
+,j+
+2
+2
+2
+2
+2
+2
+2
+2
+=−
+−
+−
+−
+Φi+ 1 ,j+ 1 +
+Φi− 1 ,j+ 1
+2
+2
+2
+2
+∆x∆y 4
+∆x
+∆y
+∆x
+∆y
+!
+!
+#
+y
+y
+x
+x
+Ji+
+Ji−
+Ji+
+Ji−
+1
+1
+1
+1
+,j− 12
+,j− 21
+,j− 12
+,j− 12
+2
+2
+2
+2
++ −
++
+Φi+ 1 ,j− 1 +
++
+Φi− 1 ,j− 1 .
+2
+2
+2
+2
+∆x
+∆y
+∆x
+∆y
+(73)
+We can conclude that the scheme has a local character, as the central part is local after
+the combination of the four corner fluxes, while the diffusion part is local at each corner
+residual. This leads to a scheme with a compact 3 × 3 stencil.
+4.3.1. Explicit characterization of the method in the linear case
+To give the spirit of the method, assume for the moment that the Jacobians are evaluated
+on same state (or that we deal with a linear problem). Then, the numerical stabilization
+
+15
+
+becomes
+
+
+d
+1 α∆ J x 
+q̄i,j = −
+−Φi+ 1 ,j+ 1 + Φi− 1 ,j+ 1 − Φi+ 1 ,j− 1 + Φi− 1 ,j− 1
+2
+2
+2
+2
+2
+2
+2
+2
+dt
+∆x∆y 4 ∆x
+
+
+y 
+J
++
+−Φi+ 1 ,j+ 1 − Φi− 1 ,j+ 1 + Φi+ 1 ,j− 1 + Φi− 1 ,j− 1
+2
+2
+2
+2
+2
+2
+2
+2
+∆y
+ x
+x
+x
+J
+α∆ J
+J
+[[
+[[g
+]]
+]]
++
+⟨[[s·,· ]]i ⟩j
+=
+⟨f
+−
+2f
++
+f
+⟩
++
+·,·
+i
+j
+i+1,·
+i,·
+i−1,·
+j
+4 ∆x2
+∆x∆y
+∆x
+
+Jy
+Jy
+Jy
+[[ [[f·,· ]]i ]]j +
+[[⟨s·,· ⟩i ]]j .
+⟨g·,j+1 − 2g·,j + g·,j−1 ⟩i +
++
+∆x∆y
+∆y 2
+∆y
+
+(74)
+
+(75)
+
+Here, the average ⟨·⟩ and jump [[·]] operators introduced in (65) and (66) have been used
+again.
+Finally, the method can be expressed in classical flux form
+fˆi+ 1 ,j − fˆi− 1 ,j ĝi,j+ 1 − ĝi,j− 1
+d
+2
+2
+2
+2
+qi,j +
++
+= ⟨s·,· ⟩i j .
+dt
+∆x
+∆y
+
+(76)
+
+This demonstrates that additionally to the notion (50), the method is also conservative in
+the classical sense. The numerical flux through the edge (i + 12 , j) reads
+1
+α∆
+fˆi+ 1 ,j = ⟨fi+1,· + fi,· ⟩j −
+2
+2
+2
+
+x
+x
+Ji+
+Φ 1 1 + Ji+
+Φ 1 1
+1
+1
+,j+ 1 i+ ,j+
+,j− 1 i+ ,j−
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2∆x∆y
+
+2
+
+2
+
+.
+
+In a quasi-1D situation, i.e. when nothing depends on j and when g = 0, the flux is
+
+
+α x
+1
+∆x
+ˆ
+(si+1 + si ) .
+fi+ 1 = (fi+1 + fi ) − Ji+ 1 fi+1 − fi −
+2
+2
+2
+2
+2
+
+(77)
+
+(78)
+
+With this, next we discuss the interplay between the numerical stabilization and stationarity
+preservation.
+4.4. Analysis of the method for the linear acoustic system
+In this section, we focus on the analysis of the new numerical method by analyzing the
+numerical diffusion that allows to achieve stationarity preservation, and obtaining an energy
+estimate.
+4.4.1. Numerical diffusion and stationarity preservation
+We start by considering the linear acoustic system, but similar results can be shown for
+nonlinear problems. A classical dimensionally split finite volume scheme with a local LaxFriedrichs numerical flux provides the following discretization of the linear acoustic system:
+d
+λm ∆x
+λm ∆y
+p + Dx u + Dy v =
+Dxx p +
+Dyy p,
+dt
+2
+2
+d
+λm ∆x
+u + Dx p =
+Dxx u,
+dt
+2
+d
+λm ∆y
+v + Dy p =
+Dyy v,
+dt
+2
+16
+
+(79)
+
+j + 1 − 18
+
+0
+
+1
+8
+
+j+1
+
+1
+4
+
+− 12
+
+1
+4
+
+− 14
+
+0
+
+1
+4
+
+j
+
+1
+2
+
+−1
+
+1
+2
+
+j
+
+j − 1 − 18
+
+0
+
+1
+8
+
+j−1
+
+1
+4
+
+− 12
+
+1
+4
+
+j−1
+
+i−1
+
+i
+
+i+1
+
+i−1
+
+i
+
+i+1
+
+j
+
+j + 1 − 14
+
+(b) ∆x2 D̄xx
+
+(a) ∆xD̄x
+
+0
+
+1
+4
+
+0
+
+0
+
+0
+
+1
+4
+
+0
+
+− 14
+
+i−1
+
+i
+
+i+1
+
+(c) ∆x∆yDxy
+
+Figure 2: Finite difference-like stencils for global flux differential operators.
+
+where D represent the discrete derivative operators given by
+(Dx q)i,j =
+
+qi+1,j − qi−1,j
+,
+2∆x
+
+(Dxx q)i,j =
+
+qi+1,j − 2qi,j + qi−1,j
+,
+∆x2
+
+(80)
+
+and similarly for Dy and Dyy . As can be noticed, the stencil used in this discretization is a
+simple 5-points stencil.
+Contrary to this, the stencils involved in the new first order global flux method, equipped
+with SUPG corner fluxes as described above, includes the cell itself and its eight neighbors
+(9-points stencil):
+α∆
+d
+p + D̄x u + D̄y v =
+(D̄xx p + D̄yy p),
+dt
+2
+
+d
+α∆
+D̄xx u + Dxy v ,
+u + D̄x p =
+dt
+2
+
+α∆
+d
+v + D̄y p =
+Dxy u + D̄yy v ,
+dt
+2
+
+(81)
+
+where the new finite difference operators are given by the stencils in figure 2. D̄x and D̄xx are
+standard discrete first and second order derivatives in x, but including a particular averaging
+in y direction, introduced in (65) as ⟨ai,· ⟩j := 41 (ai,j+1 + 2ai,j + ai,j−1 ). These operators have
+first appeared in [46] and then in virtually all subsequent works on stationarity and vorticity
+preservation for linear acoustics on Cartesian grids, e.g. in [46, 52, 34, 45, 40, 10].
+In [13] these finite difference operators appeared naturally as Kronecker products of unidirection operators: Dxy = Dx ⊗ Dy Iy , D̄xx = Dxx ⊗ Dy Iy etc., with matrices Iy responsible
+for the integration and Dy Iy being the particular averaging matrix corresponding to ⟨·⟩.
+One observes that the diffusion operators for the velocity no longer depend on second
+derivatives of individual components, but instead on the gradient of the divergence operator.
+Although this characteristic of the scheme is more readily visible for a simplified model like
+the linear acoustic system (81), similar considerations can be drawn also for more complex
+nonlinear systems, as is obvious from (75).
+Remark 4 (Numerical diffusion for nonlinear problems). For the shallow water equations,
+the first order global flux method with SUPG corner fluxes leads to the following discrete
+17
+
+evolution equations:
+d
+α∆
+α∆
+h + D̄x fh + D̄y gh =
+(D̄xx fhu + Dxy ghu ) +
+(Dxy fhv + D̄yy ghv ),
+dt
+2
+2
+d
+α∆
+α∆
+hu + D̄x fhu + D̄y ghu =
+(g h̄ − ū2 )(D̄xx fh + Dxy gh ) −
+ūv̄(Dxy fh + D̄yy gh )+
+dt
+2
+2
+α∆
+α∆
+v̄(Dxy fhu + D̄yy ghu ) +
+ū(Dxy fhv + D̄yy ghv ), (82)
++ α∆ū(D̄xx fhu + Dxy ghu ) +
+2
+2
+d
+α∆
+α∆
+hv + D̄x fhv + D̄y ghv =
+(g h̄ − v̄ 2 )(Dxy fh + D̄yy gh ) −
+ūv̄(D̄xx fh + Dxy gh )+
+dt
+2
+2
+α∆
+α∆
++ α∆v̄(Dxy fhv + D̄yy ghv ) +
+v̄(D̄xx fhu + Dxy ghu ) +
+ū(D̄xx fhv + Dxy ghv ),
+2
+2
+where we considered constant Jacobians defined in an average state q̄ = (h̄, h̄ū, h̄v̄) to regroup
+the terms in a compact form. For notational convenience, we have introduced the terms fhu
+and ghu to denote the fluxes for the momentum equation in hu, and similarly for the other
+equations. Again, we obtain diffusion terms that depends on the gradient of the divergence
+operator, which is essential for stationarity preservation.
+4.4.2. Semi-discrete energy stability
+In this section, we focus on the semi-discrete energy estimates for the linear acoustic
+system. In particular, in the continuous setting, it can be easily proven that the conserved
+2
+2
+2
++ p2 , by multiplying (15) by q T , summing the three
+energy of the system is E = u +v
+2
+equations and integrating over the whole domain Ω:
+Z
+Z
+T
+T
+[q ∂t q + q J∇q]dx = [u∂t u + u∂x p + v∂t v + v∂y p + p∂t p + p∂x u + p∂y v]dx
+Ω
+Ω
+
+Z  2
+Z
+d
+u + v 2 p2
+=
++
+dx +
+pv · ndS
+(83)
+dt Ω
+2
+2
+∂Ω
+where the second term is zero for periodic boundary conditions. In our discrete framework,
+we would like to prove that
+
+Z  2
+u + v 2 p2
+d
++
+dx ≤ 0.
+dt Ω
+2
+2
+To do that, we will write the new differential operators introduced above in a tensor
+product form to split the contributions from the two dimensions, for more details see [13],
+D̄x = (D+ M− ) ⊗ (M+ M− ) ,
+D̄yy = (M+ M− ) ⊗ (D+ D− ) ,
+
+D̄xx = (D+ D− ) ⊗ (M+ M− ) ,
+Dxy = (D+ M− ) ⊗ (D+ M− )
+
+where the derivative, D, and average, M , operators are defined as
+
+
+
+1
+1
+−1 1
+0 ... ...
+0 ... ...
+2
+2
+1
+1
+ 0 −1 1 . . . . . . 
+0
+. . . . . .
+
+
+
+
+2
+2
+
+
+
+
+.. .. ..
+.. .. ..
+D+ = 
+,
+M
+=
+,
+
+
+.
+.
+.
+.
+.
+.
++
+
+
+
+
+1
+1
+ . . . . . . 0 −1 1 
+. . . . . . 0
+
+2
+2
+1
+1
+... ... 0
+1 . . . . . . 0 −1
+2
+2
+18
+
+(84)
+
+with periodic boundary conditions, and by
+T
+D− = −D+
+=: D
+
+and
+
+M− = M+T =: M.
+
+Proposition 5 (Semi-discrete energy inequality). The following semi-discrete energy inequality holds,
+d X
+Ei,j ≤ 0.
+(85)
+dt i,j
+Proof. The central part of the method preserves the energy since, e.g. uT D̄x p + pT D̄x u =
+uT D̄x p + uT D̄xT p = 0 up to boundary terms. The evolution of the energy of the system is
+thus entirely given by the numerical stabilization as follows:
+2 d X
+Ei,j = pT D̄xx p + pT D̄yy p + uT D̄xx u + uT Dxy v + v T Dxy u + v T D̄yy v,
+α∆ dt i,j
+
+(86)
+
+where the terms on the right-hand side can be recast as
+pT D̄xx p = pT (D+ D− ) ⊗ (M+ M− ) p = −∥(D ⊗ M )p∥2 ≤ 0,
+pT D̄yy p = pT (M+ M− ) ⊗ (D+ D− ) p = −∥(M ⊗ D)p∥2 ≤ 0,
+uT D̄xx u = uT (D+ D− ) ⊗ (M+ M− ) u = − [(D ⊗ M )u]T [(D ⊗ M )u] ,
+uT Dxy v = uT (D+ M+ ) ⊗ (M− D− ) v = − [(D ⊗ M )u]T [(M ⊗ D)v] ,
+v T Dxy u = v T (M+ D+ ) ⊗ (D− M− ) u = − [(M ⊗ D)v]T [(D ⊗ M )u] ,
+v T D̄yy v = v T (M+ M− ) ⊗ (D+ D− ) v = − [(M ⊗ D)v]T [(M ⊗ D)v] ,
+where the mixed operator was manipulated thanks to M D = DM . Hence, the semi-discrete
+energy is found to decrease:
+2 d X
+Ei,j ≤ − [(D ⊗ M )u]T [(D ⊗ M )u + (M ⊗ D)v]
+α∆ dt i,j
+− [(M ⊗ D)v]T [(D ⊗ M )u + (M ⊗ D)v]
+= − ∥(D ⊗ M )u + (M ⊗ D)v∥2 ≤ 0.
+Z
+Z
+This is a discrete version of
+v · ∇(∇ · v) dx = − (∇ · v)2 dx + boundary terms.
+Ω
+
+Ω
+
+4.5. Analogy with Residual Distribution and discrete steady states
+The recent work of [31] has provided a general analysis of the relations between multidimensional finite volume methods with point fluxes and residual distribution schemes.
+Earlier, it has been shown in [3] that residual distribution schemes can be reformulated
+in terms of a global flux finite volume method. This section elaborates on these aspects for
+the global flux finite volume approach proposed here. This allows us to give more details on
+the discrete steady states of the method in a more general setting.
+19
+
+Following the last reference we start from the conservation condition (50) at each corner.
+Consider, instead of (51), the following ansatz for the numerical global flux, given by the
+trace of the cell (global) flux plus a fluctuation:
+(i+ℓ,j+m)
+(i+ℓ,j+m)
+c(i+ℓ,j+m)
+F
+= Fi,j ni+ 1 ,j+ 1 + Φi+ 1 ,j+ 1 ,
+i+ 1 ,j+ 1
+2
+
+2
+
+2
+
+2
+
+2
+
+ℓ, m ∈ {0, 1}.
+
+(87)
+
+2
+
+All the properties of the numerical flux can be translated into requirements on the fluc(i+ℓ,j+m)
+tuations Φi+ 1 ,j+ 1 . The most interesting ones are related to conservation and stationarity
+2
+
+2
+
+preservation. Corner conservation is written by using the above ansatz in (50), which leads
+to the requirement
+X
+(i+1,j)
+(i+1,j+1)
+(i,j+1)
+(i,j)
+(i+ℓ,j+m)
+Φi+ 1 ,j+ 1 + Φi+ 1 ,j+ 1 + Φi+ 1 ,j+ 1 + Φi+ 1 ,j+ 1 = −
+Fi+ℓ,j+m ni+ 1 ,j+ 1 = −Φi+ 1 ,j+ 1 ,
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+ℓ,m∈{0,1}
+
+2
+
+2
+
+2
+
+where Φi+ 1 ,j+ 1 is the global flux integral on the corner dual cell as defined in (57). By virtue
+2
+2
+of (87), defining a corner flux is thus equivalent to defining a residual distribution scheme
+satisfying
+X
+(i+ℓ,j+m)
+Φi+ 1 ,j+ 1 = −Φi+ 1 ,j+ 1 .
+(88)
+ℓ,m∈{0,1}
+
+2
+
+2
+
+2
+
+2
+
+This analogy goes much further, and it is in fact a full equivalence. In particular, we can
+prove the following facts.
+Proposition 6 (Equivalence with RD). Consider the multi-dimensional global flux finite
+volume method (42), with numerical fluxes written in terms of fluctuations (57). Then,
+1. the multidimensional finite volume global flux method (42) with piecewise constant data
+is equivalent to the Residual Distribution scheme
+∆x∆y
+
+d
+(i,j)
+(i,j)
+(i,j)
+(i,j)
+q̄i,j + Φi+ 1 ,j+ 1 + Φi+ 1 ,j− 1 + Φi− 1 ,j+ 1 + Φi− 1 ,j− 1 = 0 ,
+2
+2
+2
+2
+2
+2
+2
+2
+dt
+
+(89)
+
+(i,j)
+
+with fluctuations Φi± 1 ,j± 1 verifying the conservation condition (88) at each corner (i ±
+2
+
+1
+, j ± 12 );
+2
+
+2
+
+(i+ℓ,j+m)
+c(i+ℓ,j+m)
+= F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 ,
+2. the finite volume global flux method (42) with average flux F
+i+ 1 ,j+ 1
+2
+
+2
+
+2
+
+2
+
+∀ ℓ, m ∈ {0, 1} is equivalent to the residual distribution scheme with fluctuations
+(i+ℓ,j+m)
+
+2
+
+(i+ℓ,j+m)
+
+Φi+ 1 ,j+ 1 = (F i+ 1 ,j+ 1 − Fi+ℓ,j+m )ni+ 1 ,j+ 1
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+3. the finite volume method including the numerical dissipation in (51), defined by the
+streamline upwind terms (56), is equivalent to the residual distribution scheme defined
+by
+1 (i+ℓ,j+m)
+(i+ℓ,j+m)
+(i+ℓ,j+m)
+Φi+ 1 ,j+ 1 = (F i+ 1 ,j+ 1 − Fi+ℓ,j+m )ni+ 1 ,j+ 1 − δi+ 1 ,j+ 1 Φi+ 1 ,j+ 1 ,
+2
+2
+2
+2
+2
+2
+2
+2
+4 2 2
+
+
+(i+ℓ,j+m)
+Jx
+Jy
++ (−1)m ∆y
+according to (56);
+with δi+ 1 ,j+ 1 = α∆ (−1)ℓ ∆x
+2
+
+2
+
+20
+
+ℓ, m ∈ {0, 1}
+
+2
+
+4. both the centered and the stabilized method are steady state preserving with respect to
+global fluxes of the type (48). In particular, they both admit discrete steady solutions
+verifying
+Φi+ 1 ,j+ 1 = 0 ∀i, j ;
+2
+
+2
+
+5. both the centered and the stabilized method are formally second order accurate at steady
+state for smooth enough solutions.
+(i,j)
+
+(i,j)
+
+(i,j)
+
+(i,j)
+
+Proof. The first fact is a consequence of the identity ni+ 1 ,j+ 1 +ni− 1 ,j+ 1 +ni+ 1 ,j− 1 +ni− 1 ,j− 1 =
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+0, so when replacing (87) in (42) we obtain immediately (89): Using (89) or (42) to represent
+the scheme is absolutely equivalent. The second and third properties are obtained by simply
+subtracting from the average flux, and from (51) the cell contributions to obtain the corresponding fluctuations.
+Concerning the discrete kernel property, consider first the average flux without extra
+dissipation, and compute explicitly the sum of the corner contributions:
+(i,j)
+
+(i,j)
+
+(i,j)
+
+(i,j)
+
+F i+ 1 ,j+ 1 ni+ 1 ,j+ 1 + F i+ 1 ,j− 1 ni+ 1 ,j− 1 + F i− 1 ,j+ 1 ni− 1 ,j+ 1 + F i− 1 ,j− 1 ni− 1 ,j− 1
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+2
+
+Fi+1,j+1 − Fi+1,j−1 − Fi−1,j+1 + Fi−1,j−1
+=
+4
+
+1
+=
+Φi+ 1 ,j+ 1 + Φi− 1 ,j+ 1 + Φi+ 1 ,j− 1 + Φi− 1 ,j− 1 .
+2
+2
+2
+2
+2
+2
+2
+2
+4
+
+2
+
+2
+
+2
+
+(90)
+(91)
+
+This shows that Φi+ 1 ,j+ 1 = 0 is in the kernel of the average flux method. The same is true
+2
+2
+for the stabilized scheme for which we can write after assembly around cell i, j
+
+X 
+1 (i,j)
+(i,j)
+F i+ ℓ ,j+ m ni+ ℓ ,j+ m − δi+ ℓ ,j+ m Φi+ ℓ ,j+ m
+2
+2
+2
+2
+4 2 2
+2
+2
+ℓ,m∈{−1,1}
+(92)
+
+i
+X 1 h
+(i,j)
+=
+I − δi+ ℓ ,j+ m Φi+ ℓ ,j+ m
+2
+2
+4
+2
+2
+ℓ,m∈{−1,1}
+
+So to prove point 4., we just check that Φi+ 1 ,j+ 1 = 0 is also a consequence of the steady
+2
+2
+state preservation condition of Remark 3 in (49). For Fi,j = F + αi + βj as in (48), in each
+dual cell
+Φi+ 1 ,j+ 1 = F + αi+1 + βj+1 − F − αi − βj+1 − F − αi+1 − βj + F + αi + βj = 0
+2
+
+2
+
+c(i+ℓ,j+m)
+and thus F
+= F . Finally, the second-order consistency at steady state is a coni+ 12 ,j+ 12
+sequence of results for residual distribution schemes with bounded distribution coefficients
+on linear and bi-linear elements (see [29, 48, 2] and references therein). Second-order accuracy
+(i+ℓ,j+m)
+at steady state thus follows from the boundedness of the coefficients 1/4, and (I−δi+ 1 ,j+ 1 )/4
+2
+
+2
+
+which appear in the equivalent forms of the scheme (91) and (92).
+The switch from conservative finite volume to residual distribution methods contains
+some nuances on which we would like to comment. In particular, the proof uses two different
+21
+
+writings of the average flux scheme. This may be confusing as to which is the proper form to
+use. The confusion is originated from the fact that for this simple case, due to cancellation,
+the same global assembly can be obtained from several different local contributions, not all
+fitting into the same conservation framework. For example, the proof shows that the scheme
+∆x∆y
+
+Φi+ 1 ,j+ 1
+Φi+ 1 ,j− 1
+Φi− 1 ,j+ 1
+Φi− 1 ,j− 1
+d
+2
+2
+2
+2
+2
+2
+2
+2
+q̄i,j +
++
++
++
+=0
+dt
+4
+4
+4
+4
+
+(93)
+
+is equivalent to the average flux scheme. In light of (89), this may lead to the conclusion,
+(i,j)
+that the definition Φi+ 1 ,j+ 1 = Φi+ 1 ,j+ 1 /4 is a viable one; which is, however, wrong. Such
+2
+2
+2
+2
+a definition is not acceptable here, as it does not satisfy the local conservation constraint
+(88), which has a minus on the right hand side. This change of sign is related to the difference between internal and exterior oriented normals. Scheme (93) can also be shown to be
+conservative in the classical cell-vertex residual distribution framework, with the appropriate
+conservation constraint. On Cartesian meshes, this mismatch cancels out and one ends up
+with the same discretization after assembly. However, on general meshes the change in sign
+must be carefully accounted for (see e.g. [31]), and the appropriate local conservation and
+consistency conditions respected. In particular, the central RD (93) can indeed be written
+in a flux form, but the numerical flux has a much more involved expression than the simple
+average flux. The interested reader can refer to the last reference, and to [3] for more details.
+4.6. Source modification to preserve solutions at rest
+This subsection has the goal of providing a direct way to embed bathymetry source
+terms typical of the shallow water system with bottom topography. For simplicity, this part
+revolves around this PDE system, but the same approach can be also applied for other cases.
+In particular, the goal is to achieve stationarity preservation for motionless equilibria, i.e.
+lake at rest preservation, coming from the balance between the hydrodynamic pressure and
+bottom topography, which is present in both 1D and 2D configurations:
+(
+(
+h(x) + b(x) ≡ η0 ,
+h(x, y) + b(x, y) ≡ η0 ,
+1D:
+2D:
+(94)
+u(x) ≡ 0,
+u(x, y) = v(x, y) ≡ 0.
+As also shown in section 3, in a 1D global flux framework ([28]) it has been proposed to
+integrate the source terms within the flux derivative, thus obtaining a quasi-conservative
+formulation of the PDE:
+(
+(
+∂t h + ∂x qx
+∂t h + ∂x qx
+=
+0,
+
+ = 0,
+Rx
+=⇒
+qx2
+qx2
+h2
+h2
+= −gh∂x b,
+∂t qx + ∂x h + g 2 + gh∂ξ bdξ
+= 0.
+∂ t qx + ∂ x h + g 2
+(95)
+However, contrary to classical source terms, the bathymetry term shall be treated differently
+given the presence of its derivative. To achieve consistency and well-balancedness for the
+high order method, in [28] the integral of the bathymetry source is considered to jump at
+each interface. In the current low order framework the approach amounts to
+Z xi
+Z xi−1
+Z xi
+hi + hi−1
+x
+x
+Ri =
+gh∂ξ b dξ =
+gh∂ξ bdξ +
+gh∂ξ bdξ = Ri−1
++g
+(bi − bi−1 ), (96)
+2
+xi−1
+22
+
+where the second integral has been computed using a consistent approximation of ∂ξ b, while
+for the h a simple trapezoidal rule has been used.
+The same approach can also be developed for 2D systems, including the the source term
+containing ∂x in the x-flux, and the one containing ∂y in the y-flux. Starting from equation
+(21), we can integrate the source terms present in the momentum equation as follows:
+
+∂ h + ∂x (hu)+ ∂y (hv) = 0
+
+
+
+ t
+Rx
+2
+∂t (hu) + ∂x hu2 + g h2 + gh∂ξ b dξ + ∂y (huv) = 0,
+(97)
+
+
+
+
+∂ (hv) + ∂ (huv) + ∂ hv 2 + g h2 + R y gh∂ b dη = 0.
+t
+
+x
+
+y
+
+η
+
+2
+
+Proposition 7 (Lake at rest preservation). The 2D global flux scheme of the system (97)
+with the source term quadrature provided in equation (96) is exactly well-balanced for the lake
+at rest solution (94).
+Proof. To prove that the family of equilibria (94) is exactly preserved when u = v ≡ 0
+and η = h + b ≡ η0 , Since the mixed terms depend only on the velocity and thus vanish,
+the two momentum equations can be treated separately for the x and y contribution. In
+particular we want to show that given a zero velocity and constant free surface elevation,
+x
+x
+fi,j + Ri,j
+= fi−1,j + Ri−1,j
+, ∀j. Without loss of generality, we will show this result only for
+the x direction.
+By substitution of the relevant quantities, we obtain
+h2 − h2i−1
+hi + hi−1
+x
++g
+(bi − bi−1 )
+fi + Rix − fi−1 − Ri−1
+=g i
+2
+2
+hi + hi−1
+=g
+(ηi − ηi−1 ) = 0,
+∀j,
+2
+
+(98)
+(99)
+
+where the last equality holds when ηi = ηi−1 ≡ η0 , with ηi = hi + bi .
+Remark 8 (Compactness of bathymetry source term). Following the notation used in section 4.3, we can derive a compact definition of the method also for a source term defined as
+above. In particular, the central discretization will include in the update equation of hui,j the
+following term
+
+
+1
+hi+1,· + hi,·
+hi,· + hi−1,·
+g
+(bi+1,· − bi,· ) + g
+(bi,· − bi−1,· ) ,
+(100)
+∆x
+2
+2
+j
+which is clearly compact. And similarly, for the equation of hv. On the other hand, in the
+diffusion part, we will have the following term entering the definition of ΦR,hu
+i+ 1 ,j+ 1
+2
+
+
+∆y g
+
+hi+1,· + hi,·
+(bi+1,· − bi,· )
+2
+
+2
+
+
+,
+
+(101)
+
+j+ 12
+
+where ⟨zi+ 1 ,· ⟩j+ 1 = zi+ 1 ,j+1 + zi+ 1 ,j and similarly for ΦR,hv
+. This shows that the whole
+i+ 21 ,j+ 12
+2
+2
+2
+2
+method, also in the lake-at-rest well-balanced version, has a compact stencil of size 3 × 3.
+
+23
+
+FN −1,j+1
+
+FN,j+1
+
+FN −1,j
+
+FN,j
+
+FN −1,j−1
+
+FN +1,j+1
+
+i + 12 , j + 12
+
+FN +1,j
+
+i + 12 , j − 12
+
+FN,j−1
+
+FN +1,j−1
+
+Figure 3: Ghost cell labelling: ghost cells are highlighted in blue.
+
+4.7. Compatible boundary conditions
+Boundary conditions play an essential role in the practical application of numerical methods. Let us for example consider the usual ghost cell approach. In a classical dimension-bydimension finite volume method, homogeneous Neumann boundary conditions on the state
+variables can be simply enforced by copying the state. This is somewhat consistent with
+the internal treatment based on one dimensional Riemann fluxes using two states. However,
+this approach cannot be steady state preserving since it is not based on the global flux. One
+should consider corner fluxes on the boundaries, and choose the ghost states consistently with
+the equilibrium condition. Here, we construct compatible Neumann boundaries based on the
+discrete constraint Φcorner = 0, which we have shown to be the relevant multi-dimensional
+characterization of our discrete steady states. Compatible transmissive conditions require
+this relation to be verified by the ghost cells at each boundary corner.
+Let us consider the right boundary domain (see figure 3). We can impose FN +1,j−1 :=
+FN,j−1 for all j on the global fluxes, instead of computing the state variables as for classical
+homogeneous Neumann conditions. Then, we can use use directly the global flux at the
+boundary corners. This will lead to the following relation
+ΦN + 1 ,j− 1 = FN +1,j − FN,j − FN +1,j−1 + FN,j−1 = 0,
+2
+
+2
+
+(102)
+
+which gives a steady state solution.
+On corner ghosts, similarly, one has to impose FNx +1,Ny +1 := FNx ,Ny +1 , if also on the top
+side transmissive conditions must be imposed, this will results in
+FNx +1,Ny +1 = FNx ,Ny +1 = FNx +1,Ny = FNx ,Ny .
+Similar ideas can be used also for other boundary types, but in our experience transmissive
+conditions are the most critical to correctly maintain the internal structure, since they involve no external data, which provide some link to the correct solution for other boundary
+conditions.
+When seeking to preserve steady states, it is crucial to ensure that the number of equations
+imposed—either by boundary conditions or by the steady state equations—does not exceed
+the number of unknowns, or that these equations are mutually compatible.
+
+24
+
+The steady state conditions enforced by Φi+ 1 ,j+ 1 for i = 0, . . . , Nx and j = 0, . . . , Ny
+2
+2
+introduce Neq (Nx + 1)(Ny + 1) linearly independent constraints on Neq Nx Ny unknowns q̄i,j
+(for i = 1, . . . , Nx , j = 1, . . . , Ny ). To satisfy these extra constraints, Neq (2Nx + 2Ny +
+4) ghost cell values are introduced. This leaves Neq (Nx + Ny + 3) equations that can be
+specified at the boundaries, typically through Dirichlet conditions. Homogeneous Neumann
+conditions, as previously discussed, are compatible with the internal constraints and do not
+introduce additional equations. Therefore, the Neq (Nx +Ny +3) remaining degrees of freedom
+correspond to at most two sides where Dirichlet boundary conditions can be imposed, and if
+not consecutive sides, they should not have all corners included.
+In summary, when seeking equilibria, the boundary conditions must be compatible with
+the internal constraints. It is only possible, and necessary, to impose complete Dirichlet
+conditions on (at most) two boundaries. In this respect, this work is changing the perspective
+on this issue. For many years, schemes similar to the one obtained here have been considered
+as flawed due to the existence of the steady states characterized by proposition 6. This is
+due to the fact that spurious oscillating modes may also satisfy the condition Φi+1/2,j+1/2 = 0
+∀i, j (see e.g. [48, 2] and references therein). However, this is only true if one considers the
+problem locally, which is a wrong way to define multidimensional steady states as they must
+include boundary conditions. If these are imposed in a compatible manner, spurious modes
+can be controlled. This work, as well as the work discussed in [13], contributes to rectifying
+this notion.
+5. Standard finite volume scheme used for comparison
+In this section, we present the standard finite volume (FV) scheme used for comparison
+with the novel global flux (GF) scheme in the numerical experiments presented in section 6.
+The classical finite volume formulation for the 2D nonlinear hyperbolic problem (11) can be
+written by integrating it in the cell Ci,j :
+fˆi+ 1 ,j − fˆi− 1 ,j ĝi,j+ 1 − ĝi,j− 1
+d
+2
+2
+2
+2
+q̄i,j +
++
+= s̄i,j ,
+dt
+∆x
+∆y
+
+(103)
+
+where the numerical flux fˆi+ 1 ,j is computed through the local Lax-Friedrichs (or Rusanov)
+2
+flux:
+ λ 
+
+1 L
+m
+R
+R
+L
+fˆi+ 1 ,j =
+fi+ 1 ,j + fi+
+−
+q
+−
+q
+,
+(104)
+1
+1
+1
+i+ 2 ,j
+,j
+i+ 2 ,j
+2
+2
+2
+2
+2
+where
+L
+L
+fi+
+= f (qi+
+1
+1 ),
+,j
+,j
+2
+
+R
+R
+fi+
+= f (qi+
+1
+1 ),
+,j
+,j
+
+2
+
+2
+
+(105)
+
+2
+
+and similarly for the others. The source term is computed by integrating the source term
+over the cell Ci,j :
+Z x 1Z y 1
+i+ 2
+j+ 2
+1
+s̄i,j =
+sdxdy.
+(106)
+∆x∆y x 1 y 1
+i− 2
+
+25
+
+j− 2
+
+In this work, we are going to compare the first order global flux scheme against the standard
+finite volume with both piece-wise constant (first order accurate) and piece-wise linear (second
+order accurate) reconstructions. Since the solution update can be performed in a dimensionby-dimension way, we can focus only on the x-direction for simplicity. For piece-wise constant
+reconstruction, the left and right states at interface i + 12 simply are
+L
+qi+
+= q̄i,j ,
+1
+,j
+2
+
+R
+qi+
+= q̄i+1,j ,
+1
+,j
+
+∀j.
+
+(107)
+
+2
+
+While in the second order case, the left and right states are computed through a piece-wise
+linear reconstruction of the solution as
+q̃(x, y) = q̄i,j + (x − xi ) (∂x q)i,j + (y − yj ) (∂y q)i,j ,
+
+x, y ∈ Ci,j .
+
+(108)
+
+Hence, the left and right states at interface i + 12 are
+L
+= q̄i,j +
+qi+
+1
+,j
+2
+
+∆x
+(∂x q)i,j ,
+2
+
+R
+qi+
+= q̄i+1,j −
+1
+,j
+2
+
+∆x
+(∂x q)i+1,j ,
+2
+
+∀j.
+
+(109)
+
+Here, the slopes (∂x q)i,j are evaluated using the generalized minmod limiter [47]:
+
+
+q̄i+1,j − q̄i,j q̄i+1,j − q̄i−1,j q̄i,j − q̄i−1,j
+(∂x q)i,j = minmod ϑ
+,
+,ϑ
+,
+∆x
+2∆x
+∆x
+
+(110)
+
+where ϑ is used to control the amount of dissipation. In particular, the larger ϑ is, the sharper
+and more oscillatory the reconstruction will be. For the simulations presented in section 6,
+when not specified, we set the parameter ϑ = 1.3. The same approach has been used along
+the y direction.
+The classical minmod function is defined as
+
+
+min(a, b, c), if a, b, c > 0,
+(111)
+minmod(a, b, c) = max(a, b, c), if a, b, c < 0,
+
+
+0,
+otherwise.
+6. Numerical experiments
+In this section, the goal is to show the performance of the new global flux scheme (GF)
+when compared to the classical finite volume first order (FV-1) and second order (FV-2)
+approaches presented in section 5. Several test cases are presented to study the impact
+of the method on both linear and nonlinear hyperbolic problems: linear acoustics, shallow
+water and the Euler equations. The numerical experiments are performed taking the gravity
+g = 9.812, for the shallow water system, and the ratio of specific heats γ = 1.4 for the Euler
+system. All convergence analyses are performed on a set of nested quadrilateral meshes with
+Nx = Ny = 20, 40, 80, 160, 320. Time integration is performed through classical explicit Euler
+and second order Runge-Kutta methods.
+
+26
+
+102.5
+
+10−2
+
+Nx = Ny
+
+L∞ error in u
+
+10−1
+
+10−3
+10−4
+10−5
+
+FV
+FV2
+GF
+10−2
+
+FV
+FV2
+GF
+
+102
+
+101.5
+
+10−1
+
+100
+
+10−2
+
+101
+
+Computational time [s]
+
+10−1
+
+100
+
+101
+
+Computational time [s]
+
+Figure 4: Comparison of computational time vs L∞ error in u and vs grid size Nx for FV, FV-2, and GF
+methods.
+
+6.1. Linear acoustic system
+6.1.1. Stationary vortex
+The first test case considered here concerns the simulation of the linear acoustic system.
+The initial condition is a compactly supported vortex centered in (x0 , y0 ) = (0.5, 0.5) defined
+on the square [0, 1] × [0, 1] with periodic boundary conditions, which is given by
+p(x, y) = 1,
+u(x, y) = (y − y0 )f (ρ(x, y)),
+v(x, y) = −(x − x0 )f (ρ(x, y)),
+√
+
+√
+
+(x−x0 )2 +(y−y0 )2
+
+0.981
+, where r0 = 0.45, f (ρ) = γ(1+cos(πρ))2 and γ = r √12π
+.
+with ρ(x, y) =
+2
+r0
+0 315π −2048
+This vortex is taken from the work [50], where its derivation is described. This initial condition is a steady state of the acoustic system.
+In table 1, the errors computed with the L2 norm and convergence rates are shown. As
+can be noticed, the GF method outperforms the standard FV-1 and FV-2 methods in terms of
+discretization errors. Although the GF is in principle first order accurate due to the piece-wise
+constant reconstruction, a superconvergence behavior is experienced for stationary solutions
+(compare Proposition 6). Hence, the GF method is not only able to preserve the vortex
+structure, but does so at second order accuracy. In figure 4, we compare the computational
+time with the L∞ error and with the mesh size of the three methods. The computational
+cost of the GF-FV is slightly larger than the one of the classical FV-1 (on average less than a
+factor 2), while it is comparable with the compuational costs of FV-2. Still, the error of the
+GF is many order of magnitude better than classical schemes. In particular, this is evident
+when increasing the final time of the simulation, as shown in figure 5. Classical methods
+like FV-1 and FV-2 are not able to preserve the vortex structure for long times, due to their
+numerical dissipation that spoils the final solution.
+
+27
+
+Table 1: Linear acoustic system: vortex (tf = 1). L2 error and order of accuracy ñ for FV-1, FV-2 and GF.
+p
+u
+v
+Nx , Ny
+L2
+ñ
+L2
+ñ
+L2
+ñ
+FV-1
+20
+3.51E-05
+–
+6.51E-02
+–
+6.51E-02
+–
+40
+4.58E-05 -0.38 5.42E-02 0.26 5.42E-02 0.26
+80
+2.71E-05 0.75 3.97E-02 0.44 3.97E-02 0.44
+160
+1.06E-05 1.35 2.54E-02 0.64 2.54E-02 0.64
+320
+3.34E-06 1.66 1.47E-02 0.79 1.47E-02 0.79
+FV-2
+20
+4.31E-04
+–
+2.58E-02
+–
+2.58E-02
+–
+40
+2.54E-04 0.76 6.12E-03 2.07 6.12E-03 2.07
+80
+6.37E-05 1.99 1.61E-03 1.93 1.61E-03 1.93
+160
+1.29E-05 2.30 4.46E-04 1.84 4.46E-04 1.84
+320
+2.73E-06 2.24 1.25E-04 1.83 1.25E-04 1.83
+GF
+20
+4.72E-05
+–
+3.95E-04
+–
+3.95E-04
+–
+40
+4.53E-05 0.05 9.17E-05 2.10 9.17E-05 2.10
+80
+1.95E-05 1.21 2.26E-05 2.01 2.26E-05 2.01
+160
+6.42E-06 1.60 5.58E-06 2.01 5.58E-06 2.01
+320
+1.85E-06 1.79 1.38E-06 2.01 1.38E-06 2.01
+
+0.75
+
+0.001
+0.6
+
+0.00
+
+0.000
+
+0.75
+
+0.4
+0.001
+
+1.50
+
+0.002
+0.2
+0.003
+
+2.25
+3.00
+0.0
+0.60.4 0.2
+0.80.6 0.4
+1.00.8 0.61.0 0.8
+x
+x
+
+0.2
+0.8
+0.0
+
+0.8
+
+0.60.2
+
+0.004
+0.0
+1.0 0.0
+
+0.4
+0.4
+0.6
+0.20.8
+
+0.6
+0.4
+0.2
+
+1eu 15
+
+norm vel
+3.00
+2.64
+
+0.003
+
+2.28
+
+0.002
+
+0.18
+0.8
+0.12
+
+1.92
+
+0.001
+
+0.06
+0.6
+
+0.000
+
+0.00
+
+1.56
+1.20
+0.84
+
+1.0
+0.48
+0.0
+0.0
+1.2
+0.12
+0.20.0 0.40.2 0.0
+0.60.4 0.2
+0.80.6 0.4
+1.00.8 0.61.0 0.8
+x
+x
+x
+
+(a) FV-1
+
+1.0
+0.24
+
+0.004
+
+0.001
+
+0.40.06
+
+0.002
+
+0.12
+0.2
+0.18
+
+0.003
+0.004
+1.0
+
+0.24
+0.0
+0.0
+
+v
+
+1.0
+
+0.0057
+0.0051
+
+0.8
+
+0.0045
+0.0039
+
+0.6
+
+0.0033
+0.0027
+
+0.4
+
+0.0021
+0.2
+
+0.0015
+
+0.0
+0.2 0.00.4 0.20.6 0.40.8 0.61.0
+x
+x
+
+(b) FV-2
+
+0.0009
+0.0003
+0.8
+1.0
+
+norm vel
+0.24
+
+0.18
+
+0.8
+
+0.12
+0.06
+0.00
+0.06
+0.12
+0.18
+0.24
+
+0.27
+
+1.0
+
+0.24
+
+0.21
+0.18
+
+0.6
+
+0.15
+
+y
+
+0.003
+0.8
+0.002
+
+y
+
+1.50
+
+v
+
+1.0
+
+y
+
+2.25
+
+norm vel
+
+y
+
+1e 14+1
+1.0
+1.0
+0.4
+0.004
+
+3.00
+
+y
+
+1ep 15
+
+y
+
+u
+
+0.12
+
+0.4
+
+0.09
+0.2
+
+0.06
+0.03
+
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+0.00
+
+(c) GF
+
+Figure 5: Linear acoustic system: vortex. Isocontours of the velocity norm obtained with FV-1, FV-2 and
+GF after a long time integration (tf = 200).
+
+28
+
+6.2. Euler equations
+6.2.1. Isentropic vortex
+In this section, we test the proposed method on a smooth isentropic vortex [35]. The
+initial condition is given in terms of primitive variables and it consists in superposition of a
+homogeneous background flow and a perturbation:
+(ρ, u, v, p) = (1 + δρ, u0 + δu, v0 + δv, 1 + δp) .
+The test case is setp
+up in a [0, 10] × [0, 10] domain with periodic boundary conditions and
+vortex radius r = (x − 5)2 + (y − 5)2 . The vortex strength is ϵ = 5, and the entropy
+perturbation is assumed to be zero. Given these hypotheses, the perturbations on velocity
+and temperature can be written as
+
+
+
+ 
+1 − r2
+(γ − 1)ϵ2
+ϵ
+−(y − 5)
+δu
+exp
+,
+δT = −
+=
+exp(1 − r2 ).
+(x − 5)
+δv
+2π
+2
+8γπ 2
+It follows that the perturbations on density and pressure read
+γ
+
+1
+
+δρ = (1 + δT ) γ−1 − 1,
+
+δp = (1 + δT ) γ−1 − 1.
+
+This test case is a stationary solution of the Euler equations. Note, that the maximum Mach
+number for this set up is about Ma= 0.7.
+In table 2, the convergence analysis for the isentropic vortex is presented by comparing the
+FV-1, FV-2 and GF methods by running the simulation of a static vortex, i.e. u0 = v0 = 0,
+until a final time tf = 1. As observed above, the GF shows superconvergent behavior with
+order 2. In terms of discretization errors, it outperforms not only the classical piecewise
+constant finite volume method, but also the second-order approach equipped with a linear
+reconstruction. In figure 6, we compare the computational costs of the method with respect
+to the L∞ error of ρu and with the mesh size. We confirm also for the nonlinear case that the
+GF is slightly more expensive of FV-1, but comparable to FV-2, while the error is increadibly
+smaller. Even after very long simulations times (see figure 7) the new GF method is able
+to maintain the vortex, while the first order FV-1 dissipates everything away, and FV-2
+significantly distorts the vortex structure and still diffuses it more than GF. Observe that
+the nonlinearity of the equations makes this test significantly more challenging than the
+corresponding test for linear acoustics, where in particular advection is not present.
+In table 4, the convergence analysis for a moving isentropic vortex is presented with
+u0 = v0 = 1 and a final time tf = 10. Here, we can directly observe that the GF method
+is indeed first order accurate, as expected, since the reconstruction is piecewise constant.
+No superconvergence is observed in this case, as the solution is not stationary. The results
+show an relevant improvement of the GF method over the FV-1 in both discretization errors
+and convergence rates, while the FV-2 method is, in this case, the best since it is able to
+achieve second order accuracy. In figure 8, the solution at the final time is shown for the
+three methods.
+6.2.2. Isentropic vortex: low Mach behaviour
+As recalled in the introduction, the resolution of the long-time limit of linear acoustics
+is tightly connected to the low Mach number limit of the Euler equations. This connection
+29
+
+Table 2: Euler equations: isentropic vortex with u0 = v0 = 0 (tf = 1). L2 error and order of accuracy ñ for
+FV-1, FV-2 and GF methods.
+ρ
+ρu
+ρv
+ρE
+Nx , Ny
+L2
+ñ
+L2
+ñ
+L2
+ñ
+L2
+ñ
+FV-1
+20
+3.58E-01
+–
+6.77E-01
+–
+6.77E-01
+–
+1.16E+00
+–
+40
+2.47E-01 0.53 4.40E-01 0.62 4.40E-01 0.62 8.29E-01 0.48
+80
+1.49E-01 0.72 2.59E-01 0.76 2.59E-01 0.76 5.15E-01 0.68
+160
+8.33E-02 0.84 1.43E-01 0.85 1.43E-01 0.85 2.91E-01 0.82
+320
+4.42E-02 0.91 7.56E-02 0.91 7.56E-02 0.91 1.56E-01 0.90
+FV-2
+20
+1.06E-01
+–
+2.05E-01
+–
+2.00E-01
+–
+4.32E-01
+–
+40
+3.62E-02 1.55 6.74E-02 1.60 6.71E-02 1.57 1.20E-01 1.85
+80
+1.07E-02 1.76 1.93E-02 1.80 1.95E-02 1.78 2.91E-02 2.04
+160
+2.39E-03 2.16 5.58E-03 1.78 5.61E-03 1.79 7.04E-03 2.04
+320
+5.12E-04 2.22 1.39E-03 2.00 1.39E-03 2.01 1.56E-03 2.17
+GF
+20
+1.52E-02
+–
+3.67E-02
+–
+3.67E-02
+–
+4.59E-02
+–
+40
+5.95E-03 1.35 1.15E-02 1.67 1.15E-02 1.67 1.54E-02 1.57
+80
+1.76E-03 1.76 3.06E-03 1.90 3.06E-03 1.90 4.35E-03 1.82
+160
+4.69E-04 1.90 7.87E-04 1.96 7.87E-04 1.96 1.16E-03 1.90
+320
+1.21E-04 1.95 2.00E-04 1.97 2.00E-04 1.97 3.02E-04 1.94
+
+10−1
+
+Nx = Ny
+
+L∞ error in ρu
+
+102.5
+
+10−2
+10−3
+10−4
+
+FV
+FV2
+GF
+10−2
+
+FV
+FV2
+GF
+
+102
+
+101.5
+
+10−1
+
+100
+
+10−2
+
+101
+
+Computational time [s]
+
+10−1
+
+100
+
+101
+
+Computational time [s]
+
+Figure 6: Comparison of computational time vs L∞ error in ρu and vs grid size Nx for FV, FV-2, and GF
+methods.
+
+30
+
+Table 3: Euler equations: isentropic vortex with u0 = v0 = 1 (tf = 10). L2 error and order of accuracy ñ for
+FV-1, FV-2 and GF methods.
+ρ
+ρu
+ρv
+ρE
+Nx , Ny
+L2
+ñ
+L2
+ñ
+L2
+ñ
+L2
+ñ
+FV-1
+20
+6.50E-01
+–
+1.54E+00
+–
+1.54E+00
+–
+3.12E+00
+–
+40
+6.21E-01 0.06 1.46E+00 0.07 1.46E+00 0.07 3.01E+00 0.05
+80
+5.82E-01 0.09 1.31E+00 0.15 1.31E+00 0.15 2.83E+00 0.09
+160
+5.13E-01 0.18 1.06E+00 0.30 1.07E+00 0.29 2.48E+00 0.19
+320
+4.01E-01 0.35 7.58E-01 0.49 7.63E-01 0.49 1.92E+00 0.36
+FV-2
+20
+5.29E-01
+–
+1.07E+00
+–
+1.12E+00
+–
+2.48E+00
+–
+40
+2.45E-01 1.10 4.42E-01 1.28 4.84E-01 1.21 1.17E+00 1.08
+80
+6.55E-02 1.90 1.26E-01 1.80 1.37E-01 1.81 2.82E-01 2.04
+160
+1.85E-02 1.82 3.22E-02 1.97 3.42E-02 2.00 6.03E-02 2.22
+320
+3.38E-03 2.45 7.49E-03 2.10 8.12E-03 2.07 1.28E-02 2.23
+GF
+20
+5.46E-01
+–
+1.30E+00
+–
+1.13E+00
+–
+2.58E+00
+–
+40
+4.44E-01 0.30 1.02E+00 0.34 7.71E-01 0.55 2.10E+00 0.29
+80
+3.18E-01 0.48 6.96E-01 0.56 4.92E-01 0.64 1.53E+00 0.45
+160
+1.99E-01 0.67 4.12E-01 0.75 2.96E-01 0.73 9.73E-01 0.65
+320
+1.12E-01 0.82 2.24E-01 0.87 1.68E-01 0.81 5.55E-01 0.80
+
+0.000180
+0.000155
+0.000130
+0.000105
+0.000080
+42 8
+x
+
+64 10
+
+x
+
+0.000055
+86
+108
+
+0.2
+0.1 6
+0.0
+4
+0.1
+0.2
+2
+0.3
+0.4
+0
+10 0
+
+0.45
+0.30
+
+10
+
+8
+
+rhov
+
+8
+
+0.156
+0.00
+
+rhoE
+
+6
+
+4
+0.15
+
+4
+
+0.30
+2
+0.45
+
+2
+
+0.60
+0
+2 0
+
+0
+
+4 20
+x
+
+6
+
+42 8
+x
+
+(a) FV-1
+
+64 10
+x
+
+0.6010
+
+0.000276
+
+2.48
+
+0.000246
+
+2.40
+
+0.45
+
+0.000216
+
+2.32
+
+0.30
+
+0.000186
+
+2.24
+
+0.15 6
+
+0.000156
+
+2.16
+
+0.00
+
+0.000126
+
+2.08
+
+0.000096
+
+2.00
+
+0.000066
+
+1.92
+
+0.000036
+
+1.84
+
+0.000006
+86
+108
+
+1.76
+10
+
+norm vel rhoE
+
+10
+
+8
+
+0.45
+0.40
+
+8
+6
+
+0.154
+
+0.35
+0.30
+
+1.92
+
+0.25
+
+1.72
+
+0.20
+
+4
+
+0.15
+
+0.30
+2
+0.45
+
+2
+
+0.600
+
+0
+
+0
+
+0.10
+
+02
+
+24
+
+x
+
+64
+
+x
+
+86
+
+(b) FV-2
+
+10
+8
+
+1.52
+1.32
+
+0.05
+
+1.12
+
+0.00
+10
+
+0.92
+
+0.675
+0.600
+
+2.32
+2.12
+
+norm vel
+
+10
+
+2.52
+
+8
+
+0.525
+0.450
+
+6
+
+0.375
+
+y
+
+0.000205
+
+0.3 8
+
+norm vel
+
+0.6010
+
+y
+
+0.000230
+
+0.4
+
+y
+
+0.000255
+
+0.510
+
+y
+
+0.000280
+
+y
+
+rhou
++2.465
+
+y
+
+rhov
+
+0.300
+
+4
+
+0.225
+0.150
+
+2
+
+0.075
+0
+
+0
+
+2
+
+4
+
+x
+
+6
+
+8
+
+10
+
+0.000
+
+(c) GF
+
+Figure 7: Euler equations: isentropic vortex with u0 = v0 = 0. Isocontours of the velocity norm obtained
+with FV-1, FV-2 and GF after a long time integration (tf = 200).
+
+31
+
+1.23
+8
+
+1.155
+8
+
+3.474
+
+1.08
+
+1.065
+
+3.402
+3.366
+
+42
+
+x
+
+8 64
+
+10 8 6
+x
+
+6
+0.93
+0.78
+4
+0.63
+
+0.885
+4
+0.795
+
+3.330
+
+0.48
+2
+
+0.705
+2
+
+3.294
+
+0.33
+
+0.615
+
+3.258
+108
+
+0
+0.18
+10 0
+
+0
+0.525
+20
+
+rhov
+
+8
+
+6
+0.975
+
+y
+
+3.438
+
+10
+
+6
+
+1.460
+
+4.02
+
+1.435
+
+3.72
+
+1.410
+
+3.42
+
+1.385
+1.360
+
+4
+
+0
+42 0
+x
+
+2.22
+
+0.72
+
+1.92
+
+2
+0.62
+
+1.285
+
+1.62
+
+0.52
+
+1.260
+108
+
+1.32
+10
+
+0
+0.42
+
+x
+
+8 64
+
+(a) FV-1
+
+10 8 6
+x
+
+norm vel
+
+rhoE
+1.80
+1.65
+
+8
+
+1.02
+6
+0.92
+0.82
+4
+
+1.310
+
+64 2
+
+2.82
+
+10
+
+1.22
+8
+1.12
+
+2.52
+
+1.335
+
+2
+
+3.12
+
+10
+1.32
+
+6
+
+3.6
+
+1.35
+
+3.4
+
+1.20
+
+3.2
+
+0.90
+2
+
+0
+
+0
+2 0
+
+0.75
+
+42
+
+x
+
+64
+
+x
+
+86
+
+(b) FV-2
+
+108
+
+norm vel
+
+10
+
+1.72
+
+3.8
+
+1.50
+
+1.05
+
+4
+
+4.0
+
+3.0
+2.8
+
+0.60
+
+2.6
+
+0.45
+10
+
+2.4
+
+1.62
+
+8
+
+1.52
+1.42
+
+6
+
+1.32
+
+y
+
+3.510
+
+norm vel rhoE
+
+10
+1.245
+
+y
+
+10
+1.38
+
+y
+
+3.546
+
+y
+
+rhou
+
+y
+
+rhov
+
+1.22
+
+4
+
+1.12
+1.02
+
+2
+
+0.92
+0
+
+0
+
+2
+
+4
+
+x
+
+6
+
+8
+
+10
+
+0.82
+
+(c) GF
+
+Figure 8: Euler equations: isentropic vortex with u0 = v0 = 1. Isocontours of the velocity norm obtained
+with FV-1, FV-2 and GF at tf = 10.
+
+is studied in depth e.g. in [36, 37]. A connection between stationarity preservation and
+preservation of asymptotic has not been rigorously proved, however previous studies have
+shown that stationarity preserving methods are also well behaved for low Mach [14, 9].
+Following the last references, in this section we investigate the low Mach behaviour of the
+new stationarity preserving formulation. To this end we compute long time simulations of the
+same vortex for Mach numbers Ma = 10−2 , Ma = 10−4 , and Ma = 10−6 . The contours of the
+velocity norm at time tf = 200 on a 40×40 mesh are visualized on figure 9. The figure shows
+clearly that the first order finite volume method without reconstruction is unable to provide a
+reasonable approximation on this mesh level, giving essentially a constant state. The second
+order method improves this, however considerably losing the circular symmetry of the vortex,
+with significant dissipation. The new method provides a remarkable approximation, with very
+little dissipation, and perfect circular symmetry despite of the coarse Cartesian mesh.
+To provide a quantitative assessment of the enhancements brought by our approach, on
+figure 10 we report the convergence of the error of the x momentum at tf = 200. The error
+is scaled by the exact maximum value (which is of the order of the Mach number itself), to
+allow a comparison of the results for the three values of the Mach number. The results for the
+FV method are similar to the unfiltered ones presented in [36] for the velocity: the method
+barely converges on the coarser resolutions, and starts converging with a slope of about 1/2
+only on the finest resolution (which is considerably finer that those used in the reference).
+Despite of the poor qualitative results obtained on the coarsest meshes, the second order
+FV method does provide the expected slope for all Mach numbers. However, our approach
+provides errors which are systematically two orders of magnitude smaller, for all grid sizes and
+meshes. This supports the idea that stationarity preservation and asymptotic preservation
+are tightly linked.
+6.2.3. Perturbation of the isentropic vortex
+In this section, we present a test case for the Euler equations that consists in a perturbation of the isentropic vortex presented in the previous section. The initial conditions for
+the three schemes FV-1, FV-2 and GF are taken as the final results qeq of the respective
+simulations run until final time tf = 50 with a 80 × 80 mesh.
+Then, we add to the initial conditions a density perturbation δρ centered in (4, 4) of the
+32
+
+0.030
+4
+0.331
+
+0.032
+4
+0.353
+
+2.532
+
+6 42
+
+x
+
+864
+
+108 6
+x
+
+2.033
+108
+
+1.56
+
+0.632
+2
+0.932
+
+0.674
+2
+0.995
+
+1.233
+0
+10
+0
+
+1.316
+0
+2 0
+
+y
+
+y
+
+6
+4
+2
+0
+4 20
+x
+
+6 42
+
+x
+
+8 64
+
+108 6
+x
+
+8
+
+1.36
+
+6.732
+
+0.2896
+
+1.16
+
+6.479
+
+0.96
+
+6.222
+
+0.032
+4
+0.353
+
+0.76
+
+5.969
+
+0.56
+
+5.715
+
+0.36
+
+5.458
+
+0.16
+108
+
+5.205
+10
+
+6
+4
+
+0.674
+2
+0.995
+
+2
+
+1.316
+0
+
+0
+0
+
+(a) FV-1, Ma = 10−2
+
+rhou
+
+6 10
+8
+
+norm vel
+rhoE rhov
+1e 5 1e 7
+1e 7+2.5 1e 7
+2.958 10 10 10
+2.959 10 10
+0.0040 3.149
+0.0000275 3.780
+2.210
+2.210
+0.0000158 3.031
+0.0035 2.387
+8 8
+8
+8
+8
+1.461
+1.461
+2.283
+0.0000042
+0.0030 1.6240.712
+0.712
+1.534
+0.0000074
+0.862
+6
+6
+0.0025
+0.037 6 6
+0.036 6
+0.0000191 0.785
+0.099
+0.785
+0.785
+0.0020
+0.0000307 0.0364 4
+0.663
+4
+4
+4
+1.534
+1.534
+0.0015
+0.0000423 0.712
+1.426
+2.283
+2.283
+0.0010
+2 2
+2
+2
+2
+0.0000540 1.461
+2.189
+3.032
+3.031
+0.0005 2.951
+0.0000656 2.210
+3.780 0 0
+3.780 0
+0
+0
+0.0000772 2.959
+0.0000 3.714
+8 10 10
+0 0 2 0 2 4 2 4 6 4 6 8 6 810 8 10 10
+0
+0 2
+x
+x
+x
+
+0.0000349
+0.0006881
+0.0000032
+0.0006028
+
+88
+x
+
+6 10
+10 8
+
+0.983
+88
+0.666
+
+8
+
+0.3496 6
+0.032
+
+0.0005175
+0.0000285
+
+0.285
+44
+
+0.0004321
+0.0000603
+
+0.603
+
+0.0003468
+0.0000920
+
+22
+0.920
+
+2
+
+0.0002615
+0.0001237
+
+1.237
+00
+1.554
+
+0
+
+0.0001761
+0.0001554
+10
+
+rhov
+1e 8+2.4999999
+
+4
+
+00
+
+2 20
+
+4 42
+
+xx
+
+6 64
+
+886
+x
+
+1010 8
+
+(g) GF, Ma = 10−2
+
+norm vel
+rhoE
+
+1.76
+
+9.019
+
+1.56
+
+8.815
+
+1.36
+
+8.615
+
+1.16
+
+8.411
+
+0.96
+
+8.207
+
+0.76
+
+8.002
+
+0.56
+
+7.798
+
+0.36
+
+7.594
+
+0.16
+10
+
+7.390
+
+1.96
+1.76
+
+8
+
+1.56
+1.36
+
+6
+
+1.16
+0.96
+
+4
+
+0.76
+2
+
+0.56
+0.36
+
+0
+0
+
+2.5
+2.0
+
+0.076
+
+1.0
+
+10
+
+0.010
+6.875
+
+0.285
+
+6.023
+0.008
+
+0.032
+
+5.171
+0.006
+4.319
+0.004
+3.467
+0.002
+2.616
+
+0.349 4
+
+0.000
+1.764
+10
+
+0.666
+0.983
+1.300
+
+6
+
+0.686
+
+4.0
+3.5
+
+2.5
+2.0
+
+4
+
+1.5
+
+1.449
+2.211
+
+0.5
+
+2.974
+
+0.0
+
+3.736
+
+1.0
+
+2
+
+0.5
+0
+0
+
+0.000086.025
+5.153
+0.00006
+4.281
+0.00004
+3.408
+0.000022.536
+
+4
+
+2
+
+2
+
+0
+
+0
+0
+
+0 2
+
+24
+
+x
+
+46
+
+x
+
+68
+
+10
+8
+
+(h) GF, Ma = 10−4
+
+2
+
+4
+
+x
+
+6
+
+8
+
+0.0
+
+10
+
+(f) FV-2, Ma = 10−6
+norm vel
+
+0.000001.664
+10
+
+1e 6 1.6
+
+10
+
+1.4
+8
+
+0.000106.898
+
+6
+
+1e 7
+
+3.0
+
+9.515
+0.00014
+8.642
+0.00012
+7.770
+
+8
+
+0.16
+
+10
+
+6
+
+1e 12+2.5
+0.00016
+
+10
+
+8
+
+8
+
+0.839
+
+1.5
+
+8 10
+
+x
+
+6
+
+norm vel
+
+3.0 1.602
+
+6 8
+
+4
+
+10
+
+3.5 2.364
+
+4 6
+x
+x
+
+2
+
+(c) FV-1, Ma = 10−6
+4.0 3.127
+
+2 4
+
+1e 12
+
+10
+
+1e
+1e 59+2.5
+
+norm velrhoE
+
+0.016 1e 6 1.554
+10
+9.431
+1.237
+0.014
+8.579
+0.920 8
+0.012
+7.727
+0.603
+
+6
+
+x
+
+108
+
+y
+
+0.0000666
+0.0007735
+
+10
+
+x
+
+86
+
+9.224
+
+(e) FV-2, Ma = 10−4
+
+y
+
+0.0000983
+0.0008588
+
+norm
+rhoE
+vel
+1010
+1.300
+
+y
+
+1e 6
+0.0001301
+0.0009441
+
+yy
+
++2.499
+
+64
+
+y
+
+y
+
+y
+
+(d) FV-2, Ma = 10−2
+
+rhou
+
+42
+
+1.96
+
+(b) FV-1, Ma = 10−4
+
++2.5
+
+y
+y
+
+68
+x
+
+20
+
+norm vel
+
+1e 101e 13+2.5
+
+10
+
+y
+
+4.527
+
+3.031
+
+1.76
+
+norm vel rhoE
+
+1e 12 1.573
+10
+1.252
+7.243
+0.9318
+6.986
+0.610
+7.496
+
+y
+
+0.2896
+
+y
+
+6
+0.271
+
+3.529
+
+1.96
+
+8
+
+5.026
+4.028
+
+rhov13+2.499999998
+1e
+1e 8
+
+1.2
+1.0
+
+6
+
+0.8
+
+y
+
+10
+
+y
+
+norm vel rhoE
+
+1e 10 1.474
+1e 12 1.573
+10
+10
+1.173
+1.252
+6.024
+0.872
+0.9318
+8
+5.525
+0.571
+0.610
+6.523
+
+y
+
+rhov10+2.499983777
+rhou
+1e
+
+4
+
+0.6
+0.4
+
+2
+
+0.2
+0
+0
+
+2
+
+4
+
+x
+
+6
+
+8
+
+10
+
+0.0
+
+(i) GF, Ma = 10−6
+
+Figure 9: Euler equations: Low Mach stationary isentropic vortex. Isocontours of the velocity norm at
+tf = 200 obtained with FV-1 (top row), FV-2 (middle row), and GF (bottom row). Left: Ma=0.01. Center:
+Ma = 0.0001. Right: Ma=0.000001.
+
+33
+
+(a) FV-1
+
+(b) FV-2
+
+(c) GF
+
+Figure 10: Euler equations: Low Mach stationary isentropic vortex. Mesh convergence of the error on the
+x momentum (scaled by the exact maximum value) at tf = 200 and different Mach numbers for the FV-1
+(left), FV-2 (center), and GF (right). On y-axis the log10 (∥ρu − (ρu)exact ∥L∞ /∥(ρu)exact ∥L∞ ) while on the
+x-axis the log10 (∆x).
+
+Table 4: Euler equations: isentropic vortex with u0 = v0 = 1 (tf = 10). L2 error and order of accuracy ñ for
+FV-1, FV-2 and GF methods.
+ρ
+ρu
+ρv
+ρE
+Nx , Ny
+L2
+ñ
+L2
+ñ
+L2
+ñ
+L2
+ñ
+FV-1
+20
+6.50E-01
+–
+1.54E+00
+–
+1.54E+00
+–
+3.12E+00
+–
+40
+6.21E-01 0.06 1.46E+00 0.07 1.46E+00 0.07 3.01E+00 0.05
+80
+5.82E-01 0.09 1.31E+00 0.15 1.31E+00 0.15 2.83E+00 0.09
+160
+5.13E-01 0.18 1.06E+00 0.30 1.07E+00 0.29 2.48E+00 0.19
+320
+4.01E-01 0.35 7.58E-01 0.49 7.63E-01 0.49 1.92E+00 0.36
+FV-2
+20
+5.29E-01
+–
+1.07E+00
+–
+1.12E+00
+–
+2.48E+00
+–
+40
+2.45E-01 1.10 4.42E-01 1.28 4.84E-01 1.21 1.17E+00 1.08
+80
+6.55E-02 1.90 1.26E-01 1.80 1.37E-01 1.81 2.82E-01 2.04
+160
+1.85E-02 1.82 3.22E-02 1.97 3.42E-02 2.00 6.03E-02 2.22
+320
+3.38E-03 2.45 7.49E-03 2.10 8.12E-03 2.07 1.28E-02 2.23
+GF
+20
+5.46E-01
+–
+1.30E+00
+–
+1.13E+00
+–
+2.58E+00
+–
+40
+4.44E-01 0.30 1.02E+00 0.34 7.71E-01 0.55 2.10E+00 0.29
+80
+3.18E-01 0.48 6.96E-01 0.56 4.92E-01 0.64 1.53E+00 0.45
+160
+1.99E-01 0.67 4.12E-01 0.75 2.96E-01 0.73 9.73E-01 0.65
+320
+1.12E-01 0.82 2.24E-01 0.87 1.68E-01 0.81 5.55E-01 0.80
+
+34
+
+6
+
+6
+
+y
+
+y
+
+0.00096
+0.00048
+
+4
+
+y
+
+6
+
+4
+
+4
+
+0.00048
+
+0
+
+2
+
+4
+
+x
+
+6
+
+8
+
+(a) FV-1
+
+10
+
+0.004
+8
+0.003
+
+8
+
+8
+
+0.0012
+0.0006
+
+0.0026
+
+6
+
+0.0000
+
+0.0012
+2
+
+2
+
+0.0018
+
+0.00096
+0
+
+10
+
+0.0006
+
+0.00000
+2
+
+10
+
+0.0018
+
+0.00144
+
+0
+
+0
+
+0
+20
+
+0.0024
+42
+
+x
+
+6 4
+
+x
+
+8 6
+
+10 8
+
+rhov
+
+10
+0.005
+
+0.0024
+
+10
+
+(b) FV-2
+
+rho
+0.0024
+0.0018
+0.0012
+
+0.001
+4
+0.000
+
+4
+
+0.0006
+
+6
+
+0.0000
+4
+
+0.0006
+0.0012
+
+0.001
+2
+0.002
+0
+
+rhou
+
+2
+
+0
+
+0
+20
+
+2
+0
+4 20
+x
+
+0.0018
+0.0024
+6 42
+
+x
+
+8 6 4 10 86
+x
+
+108
+
+10
+
+8 0.00358
+0.0050
+0.0030
+0.0025
+6 0.00256
+0.0000
+0.0020
+0.0025
+4
+4
+0.0015
+0.0050
+0.0010
+0.0075
+2
+2
+0.0005
+0.0100
+0.0000
+0.0125
+0
+0
+10
+0
+20
+
+8
+
+(c) GF
+
+Figure 11: Euler equations: perturbation of the isentropic vortex. Isocontours of the ρ − ρeq norm obtained
+with FV-1, FV-2 and GF at final time tf = 2 with a 80 × 80 mesh.
+
+form:
+δρ = Ae−
+
+(x−4)2 +(y−4)2
+σ2
+
+where A = 5 · 10−3 and σ = 0.8. The simulation is run until a final time t = 2 to compare
+the effect of the numerical viscosity on the evolution of the perturbation.
+In figure 11, we show the density contour plot at the final time for the three methods. The
+GF method is able to capture the perturbation sharply, while the FV-1 and FV-2 methods
+have discretization errors too large to capture it properly. By looking at the isocontours
+scales, it is clear that the perturbation is completely dissipated for the FV-1 method, while
+for the FV-2 method the perturbation is still visible but with a much larger error compared
+to the expected solution.
+6.2.4. Sod’s circular problem
+Here, we test the robustness of the global flux method on the Euler equations for the Sod
+circular problem. This case is fully non-linear, and with Mach number of order one, allowing
+to show that the new method has “all Mach” capabilities. The problem is a two-dimensional
+extension of the classical shock tube problem. The simulation is performed on a domain
+[−1, 1] × [−1, 1] and the initial condition is given by
+(
+Qi if r ≤ R,
+Q(x, 0) =
+Qe if r > R,
+p
+with r = x2 + y 2 . The circle of radius R = 0.5 is centered in the origin and separates
+the inner state Qi from the outer state Qe , where Q = (ρ, u, v, p). The initial conditions are
+given by Qi = (1, 0, 0, 1) and Qe = (0.125, 0, 0, 0.1). For a reference solution of this problem,
+we refer to [18].
+To have a smoother initial condition, the two states are connected by a smooth transition
+region given by an erfc function defined as
+
+
+1
+r−R
+ζ(r) = erfc
+,
+2
+δ
+
+35
+
+rhoE
+
+10 0.0045
+10
+0.0100
+0.0075 0.0040
+
+rhov
+
+rhou
+
+6
+
+y
+
+8
+
+rho
+
+y
+
+8
+
+rhou
+
+y
+
+10
+
+y
+
+0.00192
+
+8
+
+10
+
+y
+
+0.00240
+
+y
+
+rho
+
+10
+
+4
+2
+0
+4 20
+x
+
+6 42
+
+x
+
+8 6 4 10 8
+x
+
+1.00
+
+1.00
+
+1.00
+
+0.75
+
+0.75
+
+0.75
+
+0.50
+
+0.50
+
+0.50
+
+0.25
+
+0.25
+
+0.25
+
+0.00
+
+0.00
+
+0.00
+
+0.25
+
+0.25
+
+0.25
+
+0.50
+
+0.50
+
+0.50
+
+0.75
+
+0.75
+
+0.75
+
+1.00
+
+1.00
+1.00 0.75 0.50 0.25 0.00 0.25 0.50 0.75 1.00
+
+1.00
+1.00 0.75 0.50 0.25 0.00 0.25 0.50 0.75 1.00
+
+(a) FV-1 density
+
+(b) FV-2 density
+
+GF
+FV-1
+FV-2
+
+GF
+FV-1
+FV-2
+
+6
+
+p
+
+0.5
+
+(c) GF density
+
+GF
+FV-1
+FV-2
+
+1
+
+v
+
+ρ
+
+1
+
+1.00 0.75 0.50 0.25 0.00 0.25 0.50 0.75 1.00
+
+0.5
+
+4
+2
+
+0
+0
+
+0.5
+
+1
+
+0
+
+0.5
+
+y
+(d) Slice of ρ at x = 0
+
+y
+(e) Slice of v at x = 0
+
+1
+
+0
+
+0.5
+
+1
+
+y
+(f) Slice of p at x = 0
+
+Figure 12: Euler equations: Sod’s circular problem. Numerical results obtained on a 400 × 400 mesh with
+FV-1, FV-2 and GF methods run until a final time tf = 0.2.
+
+36
+
+where δ = 0.01. Therefore, we can define the smoothed initial condition as
+Q(r, 0) = ζ(r)Qi + (1 − ζ(r))Qe .
+The simulation is run until final time tf = 0.2 before the shock waves reach the boundaries.
+In figure 12, we present the numerical results obtained on a 400 × 400 mesh with the three
+methods FV-1, FV-2 and GF. For all situations, we show the density contour plot at the final
+time, along with a slice of the density and vertical velocity on the x = 0 axis. It can be noticed
+that, among all three simulations, the GF performs much better than the standard first order
+scheme and it is clearly comparable to a second order one. It is able to sharply capture the
+three waves, which are smoothed out by the classical FV-1. GF also avoids oscillations at
+the beginning of the rarefaction, while the FV-2 shows small oscillations. On the foot of the
+rarefaction, the GF show sharper results, while it is a little more diffusive on the contact
+discontinuity with respect to the FV-2. On the shock, the GF does not oscillate, while the
+FV-2 shows minimal oscillations and is a little more sharply representing the discontinuity.
+This test case not only allows us to show the robustness of the method to deal with
+unsteady shock propagation. It also provides interesting insights into its low dissipation even
+though the method has not been designed to have any particular properties on unsteady
+solutions.
+6.2.5. Kelvin-Helmholtz instability
+We consider a smooth Kelvin-Helmholtz instability for the Euler equations, introduced
+in [39] to further confirm the ability of our approach to correctly cope with the low Mach
+limit. numerical scheme to cope with low Mach number flow and to assess qualitatively the
+numerical diffusion of the method. There is a large body of work available in the literature
+concerning the shortcomings of classical Finite Volume methods in the subsonic regime (see
+e.g. [11]). The effect of stabilizing diffusion becomes bigger as the Mach number decreases,
+making it necessary to use highly resolved grids in order to capture the features of the flow.
+Numerical methods that are not low Mach number compliant typically also stabilize KelvinHelmholtz setups in an artificial way.
+The simulations are performed in the domain [0, 2]×[−1/2, 1/2] until a final time tf = 80.
+The initial condition is given by the following primitive variables:
+ρ = γ + H(y) r,
+
+u = M H(y),
+
+v = δ M sin(2πx),
+
+p = 1,
+
+where the Mach number parameter is M = 10−2 and we use r = 10−3 and δ = 0.1. The
+function H(y) is defined as,
+
+
+1
+π
+y
++
+,
+−
+sin
+
+ω
+4
+
+
+−1,
+
+H(y) =
+
+sin ωπ y − 41 ,
+
+
+
+1
+
+if − 41 − ω2 ≤ y < − 14 + ω2 ,
+if − 14 + ω2 ≤ y < 41 − ω2 ,
+if 14 − ω2 ≤ y < 14 + ω2 ,
+else,
+
+where ω = 1/16. Observe that the shear flow is smooth such that for short times, there exists
+a solution to which numerical methods converge upon mesh refinement ([39]).
+37
+
+FV first order
+
+FV second order
+
+Global Flux
+
+0.4
+
+0.4
+
+0.4
+
+0.2
+
+0.2
+
+0.2
+
+0.0
+
+0.0
+
+0.0
+
+0.2
+
+0.2
+
+0.2
+
+0.4
+
+0.4
+
+0.4
+
+0.00 0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00
+
+0.00 0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00
+
+0.00 0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00
+
+(a) FV-1 (64 × 32)
+
+(b) FV-2 (64 × 32)
+
+(c) GF (64 × 32)
+
+FV first order
+
+FV second order
+
+Global Flux
+
+0.4
+
+0.4
+
+0.4
+
+0.2
+
+0.2
+
+0.2
+
+0.0
+
+0.0
+
+0.0
+
+0.2
+
+0.2
+
+0.2
+
+0.4
+
+0.4
+0.00
+
+0.25
+
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+2.00
+
+0.4
+0.00
+
+(d) FV-1 (128 × 64)
+
+0.25
+
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+2.00
+
+0.00
+
+(e) FV-2 (128 × 64)
+
+FV first order
+
+FV second order
+0.4
+
+0.2
+
+0.2
+
+0.2
+
+0.0
+
+0.0
+
+0.0
+
+0.2
+
+0.2
+
+0.2
+
+0.4
+
+0.4
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+2.00
+
+0.25
+
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+(g) FV-1 (256 × 128)
+
+(h) FV-2 (256 × 128)
+
+FV first order
+
+FV second order
+
+2.00
+
+0.00
+
+0.2
+
+0.2
+
+0.2
+
+0.0
+
+0.0
+
+0.0
+
+0.2
+
+0.2
+
+0.2
+
+0.4
+
+0.4
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+(j) FV-1 (512 × 256)
+
+2.00
+
+1.50
+
+1.75
+
+2.00
+
+0.00
+
+0.25
+
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+2.00
+
+1.75
+
+2.00
+
+Global Flux
+0.4
+
+0.50
+
+1.25
+
+(i) GF (256 × 128)
+
+0.4
+
+0.25
+
+1.00
+
+0.4
+0.00
+
+0.4
+
+0.00
+
+0.75
+
+Global Flux
+
+0.4
+
+0.25
+
+0.50
+
+(f) GF (128 × 64)
+
+0.4
+
+0.00
+
+0.25
+
+0.4
+0.25
+
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+1.75
+
+(k) FV-2 (512 × 256)
+
+2.00
+
+0.00
+
+0.25
+
+0.50
+
+0.75
+
+1.00
+
+1.25
+
+1.50
+
+(l) GF (512 × 256)
+
+Figure 13: Euler equations: Kelvin-Helmholtz instability. Density isocontours are presented for a set of
+nested meshes to compare FV-1 (top), FV-2 (middle) and GF (bottom).
+
+38
+
+In figure 13, we present the numerical results obtained with FV-1, FV-2 and GF for
+the Kelvin-Helmholtz instability arising from the aforementioned initial conditions. The
+simulations are performed on a set of 4 nested grids from a 64 × 32, the coarsest, to 512 × 256,
+the finest.
+The FV-1 scheme is not able to capture any of the features arising from the instability.
+No vortices form, since FV-1 is not low Mach number compliant.
+Much improved results are obtained using the FV-2 with a linear reconstruction of the
+conservative variables. Here, the higher order of accuracy helps to overcome excessive diffusion at this Mach number and for this simulation time. However, the structures still appear
+diffused and would need even more resolution for the vortex details to be captured.
+Very differently from these methods, the GF method is able to capture all details of the
+flow very accurately. Already on the coarsest mesh, the fluid structures start to appear and
+develop. Here, some spurious vortices are visible, which are a known artefact of virtually any
+numerical method (see e.g. [20]). When increasing the resolution, the fluid features converge
+to the expected solution found in other references [39]. Comparison to the results obtained
+with low Mach compliant methods studied in [39] shows that the GF method is at least as
+good.
+It has been suggested in [10] that numerical methods for the Euler equations whose
+linearization (= method for linear acoustics) is stationarity preserving, are low Mach number
+compliant. A nonlinear stationarity preserving method naturally has this property, and some
+experimental examples of this behavior can also be found in [9]. Thus, even though we set
+out to improve the performance of the numerical method at stationary state, here we observe
+that this property is beneficial even for solutions far away from it.
+6.3. Shallow water system
+6.3.1. Potential flow
+The first test case implemented for the shallow water equations is an equilibrium (see [49])
+characterized by a known exact solution, for which it is possible to perform a convergence
+analysis. The initial condition is a potential flow defined on the square [−1, 1] × [−1, 1] with
+Dirichlet boundary conditions, which is given by
+h(x, y) = (x − x0 )(y − y0 ) + C,
+u(x, y) = (x − x0 ),
+v(x, y) = −(y − y0 )
+where C = 3/2 and (x0 , y0 ) = (0, 0). The 2D equilibrium is achieved thanks to a special
+bathymetry given by
+
+
+x2 + y 2
+1
+30 −
+− xy − C.
+b(x, y) =
+g
+2
+The solution of this potential flow is shown in figure 14, and the convergence rates computed at final time tf = 1 are presented in table 5, demonstrating the improvement brought
+about by the global flux formulation. Again, since the setup is stationary, superconvergence
+is observed. Moreover, the new method is even able to outperform FV-2.
+39
+
+h
+
+1.00
+
+0.75
+
+1.8
+
+0.50
+
+1.2
+
+1.68
+
+0.25
+
+0.00
+
+1.44
+
+0.25
+
+hv
+
+2.4
+
+1.00
+
+0.75
+
+1.8
+
+0.75
+
+0.50
+
+1.2
+
+0.50
+
+0.6
+
+0.25
+
+0.6
+
+0.25
+
+0.00
+
+0.0
+
+0.00
+
+0.0
+
+0.00
+
+1.20
+
+0.25
+
+0.6
+
+0.25
+
+0.6
+
+0.25
+
+0.50
+
+0.96
+
+0.50
+
+1.2
+
+0.50
+
+1.2
+
+0.50
+
+0.75
+
+0.72
+
+0.75
+
+1.8
+
+0.75
+
+1.8
+
+0.75
+
+1.00
+
+0.48
+
+1.00
+
+2.4
+
+1.00
+
+2.4
+
+1.00
+
+2.16
+
+0.50
+
+1.0
+
+0.5
+
+0.0
+x
+
+0.5
+
+1.0
+
+y
+
+1.92
+
+0.25
+
+1.0
+
+0.5
+
+0.0
+x
+
+0.5
+
+1.0
+
+1.0
+
+0.5
+
+0.0
+x
+
+0.5
+
+1.0
+
+y
+
+2.4
+
+0.75
+
+y
+
+hu
+
+1.00
+
+2.40
+
+y
+
+1.00
+
+Figure 14: Shallow water system: potential flow. Reference solution of the conservative variables.
+
+Table 5: Shallow water system: potential flow (tf = 1). L2 error and order of accuracy ñ for FV-1, FV-2
+and GF.
+h
+hu
+hv
+Nx , Ny
+L2
+ñ
+L2
+ñ
+L2
+ñ
+FV-1
+20
+1.54E-02
+–
+1.57E-01
+–
+1.71E-01
+–
+40
+8.25E-03 0.89 1.08E-01 0.53 1.11E-01 0.62
+80
+4.30E-03 0.94 6.60E-02 0.71 6.43E-02 0.78
+160
+2.18E-03 0.97 3.68E-02 0.84 3.47E-02 0.88
+320
+1.10E-03 0.99 1.95E-02 0.91 1.80E-02 0.94
+FV-2
+20
+2.49E-04
+–
+1.06E-03
+–
+1.47E-03
+–
+40
+5.26E-05 2.24 2.61E-04 2.02 3.25E-04 2.17
+80
+1.09E-05 2.27 7.11E-05 1.87 8.17E-05 1.99
+160
+2.24E-06 2.28 1.86E-05 1.93 2.06E-05 1.98
+320
+4.81E-07 2.21 4.69E-06 1.98 5.17E-06 1.99
+GF
+20
+1.15E-04
+–
+4.29E-04
+–
+1.11E-03
+–
+40
+2.69E-05 2.09 1.01E-04 2.08 2.39E-04 2.21
+80
+6.49E-06 2.05 2.46E-05 2.03 5.50E-05 2.11
+160
+1.59E-06 2.02 6.08E-06 2.01 1.32E-05 2.05
+320
+3.95E-07 2.01 1.51E-06 2.00 3.24E-06 2.02
+
+40
+
+norm vel
+
+1.0
+
+0.5
+
+0.0
+x
+
+0.5
+
+Table 6: Shallow water system: lake at rest (tf = 0.1). L2 error and order of accuracy ñ for FV-1 and FV-2
+schemes with the novel GF.
+h
+hu
+hv
+Nx , Ny
+L2
+ñ
+L2
+ñ
+L2
+ñ
+FV-1
+20
+7.13E-03
+–
+4.67E-02
+–
+3.61E-02
+–
+40
+2.79E-03 1.35 2.42E-02 0.95 2.04E-02 0.82
+80
+1.20E-03 1.22 1.21E-02 1.00 1.10E-02 0.89
+160
+5.46E-04 1.12 5.99E-03 1.00 5.71E-03 0.94
+320
+2.60E-04 1.06 2.98E-03 1.00 2.91E-03 0.97
+FV-2
+20
+2.92E-03
+–
+2.17E-03
+–
+2.26E-03
+–
+40
+6.76E-04 2.10 3.65E-04 2.57 3.94E-04 2.51
+80
+1.60E-04 2.07 7.58E-05 2.26 8.10E-05 2.28
+160
+3.87E-05 2.04 1.70E-05 2.15 1.78E-05 2.18
+320
+9.50E-06 2.02 4.02E-06 2.08 4.13E-06 2.11
+GF
+20
+4.50E-16
+–
+6.24E-15
+–
+6.36E-15
+–
+40
+9.71E-16
+–
+1.36E-14
+–
+1.31E-14
+–
+80
+1.58E-15
+–
+3.03E-14
+–
+3.29E-14
+–
+160
+3.38E-15
+–
+8.62E-14
+–
+8.67E-14
+–
+320
+6.47E-15
+–
+2.28E-13
+–
+2.29E-13
+–
+
+6.3.2. Lake at rest
+In this section, we test the well-balanced property, proven in section 4.6, of the global
+flux method for lake at rest solutions of the shallow water system. The problem is set in a
+rectangular domain [0, 1] × [0, 1] with periodic boundary conditions. The initial and exact
+solution is given by
+h(x, y) = 1 − b(x, y),
+
+u(x, y) = v(x, y) ≡ 0,
+
+where the bathymetry is defined as
+b(x, y) = 0.1 sin(2πx) cos(2πy).
+In table 6, a convergence study is presented at final time tf = 0.1. As expected, thanks to the
+well-balanced property of the global flux method, the GF is able to achieve machine precision
+errors. The standard FV-1 and FV-2 methods show only the classical first and second order
+convergence slopes. In figure 15, we present the comparison between the well-balanced GF
+method and the non-well-balanced FV-1 and FV-2 methods.
+6.3.3. 2D supercritical moving water equilibria
+We consider two fully multi-dimensional moving water steady states of the shallow water
+system, characterized by constant momentum in supercritical regimes. However, contrary
+to the one-dimensional version of such equilibria [28, 26], no exact solution is known for
+the simulations presented in this section. For this reason, the numerical results obtained
+through the three schemes will be compared qualitatively. The problems are simulated on a
+41
+
+hu
+
+0.8
+
+1.024
+
+y
+
+1.004
+0.984
+
+0.4
+
+0.01
+
+0.6
+
+0.00
+
+y
+
+0.6
+
+0.4
+
+0.01
+
+0.964
+0.2
+
+0.02
+
+0.2
+
+0.944
+
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+0.0
+
+0.904
+
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+0.04
+
+0.8
+
+0.02
+0.01
+
+0.6
+
+0.00
+0.4
+
+0.01
+0.02
+
+0.2
+
+0.03
+
+0.924
+
+1.0
+
+0.03
+0.8
+
+0.02
+
+y
+
+1.044
+
+norm vel
+
+0.04
+
+1.0
+
+0.03
+
+1.064
+
+0.8
+
+hv
+
+0.04
+
+1.0
+
+1.084
+
+0.6
+
+y
+
+h
+1.0
+
+0.4
+0.2
+
+0.03
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+0.04
+
+1.0
+
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+(a) FV-1
+hu
+1.068
+
+0.4
+
+0.6
+
+0.0000
+
+0.4
+
+0.972
+0.948
+
+0.2
+
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+0.6
+
+0.0000
+
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+0.0008
+
+0.2
+
+0.2
+
+0.0012
+0.0
+
+0.0016
+
+1.0
+
+0.4
+
+0.0004
+
+0.0012
+
+0.900
+
+0.6
+
+0.0004
+
+0.4
+
+0.0008
+
+0.2
+
+0.8
+
+0.0008
+
+0.0004
+
+0.924
+0.0
+
+0.0012
+
+0.8
+
+0.0004
+
+y
+
+y
+
+0.996
+
+1.0
+
+0.0016
+
+0.0008
+
+1.020
+
+0.6
+
+0.0012
+
+0.8
+
+1.044
+
+norm vel
+
+1.0
+
+0.0016
+
+y
+
+0.8
+
+hv
+
+1.0
+
+1.092
+
+y
+
+h
+1.0
+
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+0.0
+
+0.0016
+
+1.0
+
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+(b) FV-2
+hu
+
+1.044
+
+0.4
+
+0.972
+0.948
+
+0.2
+
+0.6
+0.4
+
+2.50
+3.75
+
+0.2
+
+5.00
+
+0.924
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+0.900
+
+6.25
+
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+1.2
+0.0
+
+y
+
+1.25
+
+0.8
+
+2.4
+
+0.6
+
+0.00
+
+y
+
+y
+
+0.996
+
+0.8
+
+1.25
+
+1.020
+
+0.6
+
+1.0
+
+3.6
+
+2.50
+
+0.8
+
+norm vel
+
+1e 14 4.8
+
+1.0
+
+3.75
+
+1.068
+
+0.8
+
+hv
+
+1e 14 5.00
+
+1.0
+
+1.092
+
+1.2
+
+0.4
+
+0.6
+
+y
+
+h
+1.0
+
+0.4
+
+2.4
+0.2
+
+3.6
+4.8
+
+0.0
+0.0
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.8
+
+1.0
+
+0.2
+0.0
+0.0
+
+(c) GF
+Figure 15: Shallow water system: lake at rest. Numerical results for the lake at rest solution on the coarse
+mesh 40 × 40 at final time tf = 0.1 obtained with FV-1, FV-2 and GF.
+
+42
+
+0.2
+
+0.4
+
+x
+
+0.6
+
+0.
+
+h, FV-1
+
+hv, FV-1
+
+h, FV-2
+
+hv, FV-2
+
+h, GF
+
+hv, GF
+
+Figure 16: Shallow water system: 2D supercritical equilibria. Numerical results obtained with FV-1, FV-2
+and GF to steady state for Nx = Ny = 450.
+
+rectangular domain [0, 25] × [0, 8], and are made fully multi-dimensional by employing a 2D
+bathymetry that is a function of both x and y, given by
+ 
+
+
+ 1 1 − r(x,y) 2 , where r(x, y) < 2
+2
+b(x, y) = 5
+
+0, elsewhere
+p
+with r(x, y) = (x − x0 )2 + (y − y0 )2 and (x0 , y0 ) = (10, 4). The initial conditions of the
+first problem are given by
+h(x, y, 0) = 2 − b(x, y),
+
+qx (x, y, 0) = 24,
+
+qy (x, y, 0) = 0.
+
+Inlet boundary conditions (equal to the initial conditions) are imposed on the left boundary
+of the domain, and outlet (homogeneous Neumann) on the right. Top and bottom of the
+domain are periodic boundaries. In figure 16, we present the numerical solutions for the
+conservative variables when the numerical steady state is reached (time residual close to
+machine precision). All simulations are performed on a mesh of 450 × 450 elements. GF
+is able to capture and resolve sharply the many shocks appearing behind the bathymetry
+bump. Although the mesh resolution for this case is quite fine, FV-1 still presents a highly
+diffused result. An improvement is experienced when using the linear reconstruction for
+FV-2, although all the waves still appear as smooth transitions. However, the results of the
+classical methods still remain significantly inferior to those of GF, which captures all waves
+sharply in much fewer cells.
+In figure 17, we show a perturbation of the numerical equilibrium obtained above. We
+add a small drop of water shaped as
+δh(x, y) = 10−4 e−
+43
+
+(x−16)2 +(y−3)2
+0.82
+
+h − heq , GF Nx = 150, Ny = 50
+0.0000886
+
+6
+
+6
+
+0.0000661
+
+5
+
+5
+
+4
+
+4
+
+y
+
+2
+
+0.0000461
+
+2
+
+1
+
+1
+
+0.0000686
+
+51
+
+0
+
+0
+25
+
+2
+
+0
+
+5
+
+10
+
+x
+
+15
+
+20
+
+h
+
+8
+
+0.0001110
+
+7
+
+0.0000886
+
+6
+
+6
+
+0.0000661
+
+5
+
+5
+
+4
+
+4
+
+y
+15
+
+20
+
+6
+
+0.0000212
+0.0000012
+
+1
+
+0.0000686
+
+0 1
+00
+
+0.0000910
+5
+10
+
+0
+25 0
+
+x
+
+0.0000686
+1
+0.0000237
+0.0000012
+
+15
+0
+
+5
+
+10
+
+x
+
+15
+
+20
+5
+
+20
+
+0.0000461
+0.0000910
+0.0000686
+0
+0.0000910
+0
+5
+
+25
+
+25
+10
+
+x
+
+15
+
+on the h variable and we continue the simulation until tf = 0.4. We plot the difference
+between each numerical equilibrium and solutions for all the methods on a coarse grid Nx =
+150, Ny = 50, while we run a finer test for the FV-1 test case on the grid Nx = 450, Ny = 450.
+Looking at the simulation of FV-1 on the coarse mesh, we barely see the perturbation as
+the method is too dissipative. For the FV-2 simulations, the perturbation is visible, but
+small oscillations are present due to the fact that the method does not reach proper time
+convergence (the time residual stays around 10−6 ). On the other hand, the GF nicely shows
+the perturbation moving towards the right without any spurious oscillations.
+As a second problem, and in order to test the robustness of the method, we also consider
+a crooked supercritical equilibrium with the same bathymetry but different initial conditions:
+qx (x, y, 0) = 24,
+
+qy (x, y, 0) = 4π.
+
+In this case, left and bottom boundaries are inlet boundaries, while right and top are outlets.
+It should be noticed, that this test case is even more challenging than the one shown before
+since no part of the fluid is aligned with the background Cartesian mesh. In figure 18, the
+results obtained for the conservative variables are presented, where the same conclusion about
+the quality of the result of the GF method can be drawn as for the previous test. All the
+physical features of the equilibria are well captured, while they are significantly more diffused
+by the FV-1 and FV-2 methods.
+7. Conclusions and perspectives
+In this work, we have presented a new way to derive finite volume methods for nonlinear
+multi-dimensional hyperbolic systems, which is based on the global flux approach (9), introduced in [13]. It is a general way to obtain stationarity preserving schemes for nonlinear
+problems. Besides its generality, the method is also able to achieve super-convergence on
+steady problems, with error reductions of one or two orders of magnitude compared to a
+standard second order finite volume approach. Despite a focus on stationary states during
+its design, we observe remarkably high resolution for unsteady multi-dimensional problems,
+44
+
+2
+1
+0
+25
+
+0
+
+8
+7
+6
+5
+
+0.0000212
+
+Figure 17: Shallow water system: perturbation of 2D supercritical equilibria. Difference between the solution
+and the equilibrium for different methods on the mesh Nx = 150, Ny = 50 and reference solution with FV
+on mesh Nx = 450, Ny = 450
+
+h(x, y, 0) = 2 − b(x, y),
+
+3
+
+0.0000437
+2
+0.0000461
+
+4
+
+2
+
+4
+
+0.0000661
+
+2 5
+
+0.0000461
+
+1
+
+x
+
+10
+25
+
+8
+
+2
+
+2
+
+10
+
+20
+5
+
+3 7
+
+1 3
+
+3
+
+5
+
+15
+0
+
+0.0000237
+
+3
+
+0
+
+0.0000437
+
+5
+
+0.0000461
+
+0.0000437
+0.0000686
+5
+0.0000910
+15
+20
+0.0000212
+x
+4
+hu 0.0000012
+0.0001110
+3
+0.0000886
+0.0000237
+
+h − heq , FV-1 Nx4 = 450, Ny = 450
+h
+
+8
+
+7
+
+0
+
+0.0000012
+0.0000661
+6
+0.0000237
+
+0
+x
+
+6
+
+0.0000212
+
+y
+
+h − heq , FV-2 Nx = 150, Ny = 50
+
+0
+
+0.0000910
+5
+10
+
+7
+
+0.0000437
+7
+0.0000886
+
+4
+
+y
+
+y
+
+y
+0.0000012
+
+hu
+
+8
+
+0.0001110
+8
+0.0000886
+0.0001110
+0.0000661
+
+6
+
+0.0000212
+
+0.0000237
+
+3
+
+hu
+
+75
+
+0.0000437
+
+63
+
+3
+
+h
+
+8
+
+87
+
+y
+
+0.0001110
+
+7
+
+7
+
+y
+
+h
+
+8
+
+20
+
+y
+
+h
+
+y
+
+h − heq , FV-1 Nx = 150, Ny = 50
+8
+
+4
+3
+2
+1
+
+100
+
+x
+
+15
+
+25 0
+
+h, FV-1
+
+hv, FV-1
+
+h, FV-2
+
+hv, FV-2
+
+h, GF
+
+hv, GF
+
+Figure 18: Shallow water system: 2D crooked supercritical equilibria. Numerical results obtained with FV-1,
+FV-2 and GF to steady state for Nx = Ny = 450.
+
+outperforming standard first and even second-order finite volume methods, for a large span
+of Mach/Froude numbers.
+This work opens the way to several future developments. In particular, the extension
+of the finite volume formulation to high order methods by using high-degree polynomial reconstruction techniques like WENO [35] is a natural next step, following the work on the
+1D global flux WENO approach introduced in [28]. Moreover, the first order finite volume
+method can also be seen as the starting point to develop a new family of multi-dimensional
+high order discontinuous Galerkin methods based on the global flux formulation. More
+investigations will also be dedicated to the extension of the method to deal with mathematical models characterized by curl-free solutions, like the Maxwell equations. Extending,
+for instance, the observation that stationarity preserving methods are also low Mach number
+compliant, theoretical work will include further analysis of the method in unsteady situations.
+References
+[1] R. Abgrall, P.-H. Maire, and M. Ricchiuto. Embedding general conservation constraints
+in discretizations of hyperbolic systems on arbitrary meshes: A multidimensional framework, 2025.
+[2] R. Abgrall and M. Ricchiuto. High order methods for CFD. In Rene de Borst Erwin Stein
+and T. J.R. Hughes, editors, Encyclopedia of Computational Mechanics, Second Edition.
+John Wiley and Sons, 2017.
+[3] R. Abgrall and M. Ricchiuto. Hyperbolic balance laws: Residual distribution, local and
+global fluxes. In Dia Zeidan, Jochen Merker, Eric Goncalves Da Silva, and Lucy T.
+Zhang, editors, Numerical Fluid Dynamics: Methods and Computations, pages 177–222.
+Springer Nature Singapore, Singapore, 2022.
+45
+
+[4] Remi Abgrall, Yongle Liu, and Mario Ricchiuto. Positivity-preserving well-balanced
+pampa schemes with global flux quadrature for one-dimensional shallow water models,
+2025.
+[5] E. Audusse, François Bouchut, Marie-Odile Bristeau, Rupert Klein, and Benoıt Perthame. A fast and stable well-balanced scheme with hydrostatic reconstruction for
+shallow water flows. SIAM Journal on Scientific Computing, 25(6):2050–2065, 2004.
+[6] E. Audusse, Minh Hieu Do, Pascal Omnes, and Yohan Penel. Analysis of modified
+Godunov type schemes for the two-dimensional linear wave equation with Coriolis source
+term on cartesian meshes. Journal of Computational Physics, 373:91–129, 2018.
+[7] E. Audusse, V. Dubos, N. Gaveau, and Y. Penel. Energy-stable and linearly wellbalanced numerical schemes for the nonlinear shallow water equations with the coriolis
+force. SIAM Journal on Scientific Computing, 47(1):A1–A23, 2025.
+[8] D.S. Balsara. Multidimensional HLLE Riemann solver: Application to Euler and magnetohydrodynamic flows. J. Comput. Phys., 229:1970–1993, 2010.
+[9] W. Barsukow. Low Mach number finite volume methods for the acoustic and Euler
+equations. Doctoral thesis, University of Wuerzburg, 2018.
+[10] W. Barsukow. Stationarity preserving schemes for multi-dimensional linear systems.
+Mathematics of Computation, 88(318):1621–1645, 2019.
+[11] W. Barsukow. Truly multi-dimensional all-speed schemes for the euler equations on
+cartesian grids. Journal of Computational Physics, 435:110216, 2021.
+[12] W. Barsukow, Raphael Loubère, and Pierre-Henri Maire. A node-conservative vorticity
+preserving finite volume method for linear acoustics on unstructured grids. Math. Comp.,
+94:2299–2343, 2025.
+[13] W. Barsukow, M. Ricchiuto, and D. Torlo. Structure preserving nodal continuous finite elements via global flux quadrature. Numerical Methods for Partial Differential
+Equations, 41(1):e23167, 2025.
+[14] Wasilij Barsukow. Stationarity preservation and the low mach number behaviour of the
+discontinuous galerkin method on cartesian grids, 2025.
+[15] Wasilij Barsukow, Mario Ricchiuto, and Davide Torlo. Stationarity preserving nodal
+finite element methods for multi-dimensional linear hyperbolic balance laws via a global
+flux quadrature formulation, 2025.
+[16] A. Bermudez and M.E. Vazquez. Upwind methods for hyperbolic conservation laws with
+source terms. Computers & Fluids, 23(8):1049 – 1071, 1994.
+[17] C. Berthon and C. Chalons. A fully well-balanced, positive and entropy-satisfying
+Godunov-type method for the shallow-water equations. Mathematics of Computation,
+85(299):1281–1307, 2016.
+46
+
+[18] W. Boscheri and M. Dumbser. Arbitrary-Lagrangian-Eulerian one-step WENO finite
+volume schemes on unstructured triangular meshes. Communications in Computational
+Physics, 14(5):1174–1206, 2013.
+[19] F. Bouchut, J. Le Sommer, and V. Zeitlin. Frontal geostrophic adjustment and nonlinear wave phenomena in one-dimensional rotating shallow water. Part 2. high-resolution
+numerical simulations. Journal of Fluid Mechanics, 514:35–63, 2004.
+[20] David L Brown. Performance of under-resolved two-dimensional incompressible flow
+simulations. Journal of Computational Physics, 122(1):165–183, 1995.
+[21] V. Caselles, R. Donat, and G. Haro. Flux-gradient and source-term balancing for certain
+high resolution shock-capturing schemes. Computers & Fluids, 38(1):16–36, 2009.
+[22] M.J. Castro and C. Parés. Well-balanced high-order finite volume methods for systems
+of balance laws. Journal of Scientific Computing, 82(2):48, 2020.
+[23] Y. Cheng, A. Chertock, M. Herty, A. Kurganov, and T. Wu. A new approach for
+designing moving-water equilibria preserving schemes for the shallow water equations.
+Journal of Scientific Computing, 80(1):538–554, 2019.
+[24] A. Chertock, S. Cui, A. Kurganov, Ş.N. Özcan, and E. Tadmor. Well-balanced schemes
+for the Euler equations with gravitation: Conservative formulation using global fluxes.
+Journal of Computational Physics, 358:36–52, 2018.
+[25] A. Chertock, A. Kurganov, Xin Liu, Yongle Liu, and T. Wu. Well-balancing via flux
+globalization: Applications to shallow water equations with wet/dry fronts. Journal of
+Scientific Computing, 90(1):1–21, 2022.
+[26] M. Ciallella, L. Micalizzi, V. Michel-Dansac, P. Öffner, and D. Torlo. A high-order, fully
+well-balanced, unconditionally positivity-preserving finite volume framework for flood
+simulations. GEM-International Journal on Geomathematics, 16(1):1–33, 2025.
+[27] M. Ciallella, L. Micalizzi, P. Öffner, and D. Torlo. An arbitrary high order and positivity
+preserving method for the shallow water equations. Computers & Fluids, 247:105630,
+2022.
+[28] M. Ciallella, D. Torlo, and M. Ricchiuto. Arbitrary high order WENO finite volume
+scheme with flux globalization for moving equilibria preservation. Journal of Scientific
+Computing, 96(2):53, 2023.
+[29] H. Deconinck and M. Ricchiuto. Residual distribution schemes: Foundations and analysis. In Encyclopedia of Computational Mechanics Second Edition, pages 1–53. John
+Wiley & Sons, Ltd, 2017.
+[30] M. Dumbser D.S. Balsara and R. Abgrall. Multidimensional HLLC Riemann Solver for
+Unstructured Meshes - With Application to Euler and MHD Flows. J. Comput. Phys.,
+261:172–208, 2014.
+
+47
+
+[31] E. Gaburro, M. Ricchiuto, and M. Dumbser. On general and complete multidimensional
+riemann solvers for nonlinear systems of hyperbolic conservation laws, 2025. arXiv
+eprint, 2506.00207, math.na.
+[32] L.L. Gascón and J.M. Corberán. Construction of second-order TVD schemes for
+nonhomogeneous hyperbolic conservation laws. Journal of Computational Physics,
+172(1):261–297, 2001.
+[33] Laurent Gosse and Giuseppe Toscani. Space localization and well-balanced schemes
+for discrete kinetic models in diffusive regimes. SIAM Journal on Numerical Analysis,
+41(2):641–658, 2003.
+[34] R. Jeltsch and M. Torrilhon. On curl-preserving finite volume discretizations for shallow
+water equations. BIT Numerical Mathematics, 46:35–53, 2006.
+[35] G.-S. Jiang and C.-C. Wu. A high-order WENO finite difference scheme for the equations
+of ideal magnetohydrodynamics. Journal of Computational Physics, 150(2):561–594,
+1999.
+[36] J. Jung and V. Perrier. Steady low mach number flows: identification of the spurious
+mode and filtering method. J. Comput. Phys., 468:111462, 2022.
+[37] J. Jung and V. Perrier. Behavior of the discontinuous galerkin method for compressible flows at low mach number on triangles and tetrahedrons. SIAM J. Sci. Comput.,
+46(1):A452–A482, 2024.
+[38] M. Kazolea, C. ParésMadroñal, and M. Ricchiuto. Approximate well-balanced WENO
+finite difference schemes using a global-flux quadrature method with multi-step ode
+integrator weights. arXiv preprint arXiv:2501.06155, 2025.
+[39] Giovanni L., R. Andrassy, W. Barsukow, J. Higl, P.V.F. Edelmann, and F.K. Röpke.
+Performance of high-order godunov-type methods in simulations of astrophysical low
+mach number flows. Astronomy & Astrophysics, 686:A34, 2024.
+[40] TB Lung and PL Roe. Toward a reduction of mesh imprinting. International Journal
+for Numerical Methods in Fluids, 76(7):450–470, 2014.
+[41] Y. Mantri, P. Öffner, and M. Ricchiuto. Fully well-balanced entropy controlled discontinuous galerkin spectral element method for shallow water flows: global flux quadrature
+and cell entropy correction. Journal of Computational Physics, 498:112673, 2024.
+[42] L. Micalizzi, M. Ricchiuto, and R. Abgrall. Novel well-balanced continuous interior
+penalty stabilizations. Journal of Scientific Computing, 100(1):14, 2024.
+[43] V. Michel-Dansac, C. Berthon, S. Clain, and F. Foucher. A well-balanced scheme for the
+shallow-water equations with topography or manning friction. Journal of Computational
+Physics, 335:115–154, 2017.
+
+48
+
+[44] V. Michel-Dansac, C. Berthon, Stéphane Clain, and Françoise Foucher. A twodimensional high-order well-balanced scheme for the shallow water equations with topography and manning friction. Computers & Fluids, 230:105152, 2021.
+[45] S. Mishra and E. Tadmor. Constraint preserving schemes using potential-based fluxes
+I. multidimensional transport equations. Communications in Computational Physics,
+9(3):688–710, 2011.
+[46] Keith William Morton and Philip L Roe. Vorticity-preserving lax–wendroff-type schemes
+for the system wave equation. SIAM Journal on Scientific Computing, 23(1):170–192,
+2001.
+[47] H. Nessyahu and E. Tadmor. Non-oscillatory central differencing for hyperbolic conservation laws. Journal of computational physics, 87(2):408–463, 1990.
+[48] M. Ricchiuto. Contributions to the development of residual discretizations for hyperbolic
+conservation laws with application to shallow water flows. Habilitation à diriger des
+recherches, Université Sciences et Technologies - Bordeaux I, December 2011. [pdf].
+[49] M. Ricchiuto and A. Bollermann. Stabilized residual distribution for shallow water
+simulations. Journal of Computational Physics, 228(4):1071–1115, 2009.
+[50] M. Ricchiuto and D. Torlo. Analytical travelling vortex solutions of hyperbolic equations
+for validating very high order schemes. arXiv preprint arXiv:2109.10183, 2021.
+[51] P.L. Roe. Upwind differencing schemes for hyperbolic conservation laws with source
+terms. In Claude Carasso, Denis Serre, and Pierre-Arnaud Raviart, editors, Nonlinear
+Hyperbolic Problems, pages 41–51, Berlin, Heidelberg, 1987. Springer Berlin Heidelberg.
+[52] D. Sidilkover. Factorizable schemes for the equations of fluid flow. Applied numerical
+mathematics, 41(3):423–436, 2002.
+[53] J. Zhang, Y. Xia, and Y. Xu. Well-balanced discontinuous galerkin method with flux
+globalization for rotating shallow water equations. Journal of Computational Physics,
+page 114094, 2025.
+
+49
+
+

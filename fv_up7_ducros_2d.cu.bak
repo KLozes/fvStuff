@@ -1,0 +1,907 @@
+/*
+ * fv_up7_ducros_2d.cu
+ * 2D Circular Sod — FV: UP7 + HLLC + Ducros D2 AV, SSP-RK3
+ *
+ * Compile:
+ *   nvcc -O3 -arch=sm_80 -o fv_up7 fv_up7_ducros_2d.cu -lm
+ *   (replace sm_80 with your GPU arch, e.g. sm_86, sm_89, sm_90)
+ *
+ * Run:
+ *   ./fv_up7            # n=400
+ *   ./fv_up7 600 0.5 0.01
+ *
+ * Output:
+ *   sod_rho.ppm   — density field  (plasma colormap)
+ *   sod_p.ppm     — pressure field (viridis colormap)
+ *   sod_sd.ppm    — Ducros sensor  (hot colormap)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+#include <time.h>
+#include <cuda_runtime.h>
+
+/* ── compile-time constants ─────────────────────────────────────────────── */
+#define GAMMA_V  1.4
+#define BLOCK1D  256         /* threads per block */
+#define GS_NBLK  256         /* fixed grid size for all grid-stride kernels */
+
+/* ── CUDA error check ───────────────────────────────────────────────────── */
+#define CK(x) do { \
+    cudaError_t _e = (x); \
+    if (_e != cudaSuccess) { \
+        fprintf(stderr, "CUDA error at %s:%d: %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(_e)); \
+        exit(1); \
+    } \
+} while (0)
+
+/* ── Array indexing: SoA layout U[q][j][i] ─────────────────────────────── */
+/* q = conserved variable (0=rho,1=rhou,2=rhov,3=E), j=row(y), i=col(x)   */
+#define IDX(q,j,i,N)  ((q)*(N)*(N) + (j)*(N) + (i))
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Device helpers
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Wall-reflecting ghost-cell fetch */
+__device__ __forceinline__ double
+fetch(const double * __restrict__ U, int q, int j, int i, int N)
+{
+    double sx = 1.0, sy = 1.0;
+    if      (i <  0) { i  = -1 - i;      sx = -1.0; }
+    else if (i >= N) { i  = 2*N - 1 - i; sx = -1.0; }
+    if      (j <  0) { j  = -1 - j;      sy = -1.0; }
+    else if (j >= N) { j  = 2*N - 1 - j; sy = -1.0; }
+    double v = U[IDX(q, j, i, N)];
+    if (q == 1) v *= sx;
+    if (q == 2) v *= sy;
+    return v;
+}
+
+/* Primitive variables from conserved */
+__device__ __forceinline__ void
+prim4(double rho, double rhou, double rhov, double E,
+      double *p, double *c, double *u, double *v)
+{
+    *u  = rhou / rho;
+    *v  = rhov / rho;
+    *p  = (GAMMA_V - 1.0) * (E - 0.5*(rhou*(*u) + rhov*(*v)));
+    double cs2 = GAMMA_V * (*p) / rho;
+    *c  = sqrt(cs2 > 1e-14 ? cs2 : 1e-14);
+}
+
+/* 2-D spectral radius (for CFL) */
+__device__ __forceinline__ double
+lambda(double rho, double rhou, double rhov, double E)
+{
+    double p, c, u, v;
+    prim4(rho, rhou, rhov, E, &p, &c, &u, &v);
+    return fabs(u) + fabs(v) + c;
+}
+
+/* Directional wave speeds (for dissipation scaling) */
+__device__ __forceinline__ double
+lambda_x(double rho, double rhou, double rhov, double E)
+{
+    double p, c, u, v;
+    prim4(rho, rhou, rhov, E, &p, &c, &u, &v);
+    return fabs(u) + c;
+}
+__device__ __forceinline__ double
+lambda_y(double rho, double rhou, double rhov, double E)
+{
+    double p, c, u, v;
+    prim4(rho, rhou, rhov, E, &p, &c, &u, &v);
+    return fabs(v) + c;
+}
+
+/* ── Upwind reconstructions at i+½ ─────────────────────────────────────── */
+/*  All stencils are left-biased for vL (upwind) and right-biased for vR.  */
+
+/* UP3  stencil[0..3] = [i-2, i-1, i, i+1]                                */
+__device__ __forceinline__ void
+up3(const double s[4], double *vL, double *vR)
+{
+    *vL = (-s[0] + 5.0*s[1] + 2.0*s[2]) / 6.0;
+    *vR = ( 2.0*s[1] + 5.0*s[2] - s[3]) / 6.0;
+}
+
+/* UP5  stencil[0..5] = [i-3, i-2, i-1, i, i+1, i+2]                      */
+__device__ __forceinline__ void
+up5(const double s[6], double *vL, double *vR)
+{
+    *vL = (  2.0*s[0] - 13.0*s[1] + 47.0*s[2]
+           + 27.0*s[3] -  3.0*s[4]) / 60.0;
+    *vR = ( -3.0*s[1] + 27.0*s[2] + 47.0*s[3]
+           - 13.0*s[4] +  2.0*s[5]) / 60.0;
+}
+
+/* UP7  stencil[0..7] = [i-4, i-3, i-2, i-1, i, i+1, i+2, i+3]            */
+__device__ __forceinline__ void
+up7(const double s[8], double *vL, double *vR)
+{
+    *vL = (-3.0*s[0] + 25.0*s[1] - 101.0*s[2] + 319.0*s[3]
+           + 214.0*s[4] - 38.0*s[5] + 4.0*s[6]) / 420.0;
+    *vR = (4.0*s[1] - 38.0*s[2] + 214.0*s[3] + 319.0*s[4]
+           - 101.0*s[5] + 25.0*s[6] - 3.0*s[7]) / 420.0;
+}
+
+/* UP9  stencil[0..9] = [i-5, i-4, i-3, i-2, i-1, i, i+1, i+2, i+3, i+4] */
+__device__ __forceinline__ void
+up9(const double s[10], double *vL, double *vR)
+{
+    *vL = (  3.0*s[0] -  25.0*s[1] + 101.0*s[2] - 319.0*s[3]
+           + 2765.0*s[4] + 2139.0*s[5] - 533.0*s[6]
+           + 97.0*s[7] -  11.0*s[8]) / 2520.0;
+    *vR = (-11.0*s[1] +  97.0*s[2] - 533.0*s[3] + 2139.0*s[4]
+           + 2765.0*s[5] - 319.0*s[6] + 101.0*s[7]
+           -  25.0*s[8] +   3.0*s[9]) / 2520.0;
+}
+
+/* ── Runtime dispatch: select reconstruction based on order ─────────────── */
+/* stencil s[0..sw-1] = cells [i-g .. i-g+sw-1] for the left interface     */
+__device__ __forceinline__ void
+up_recon(int order, const double s[10], double *vL, double *vR)
+{
+    if      (order == 3) up3(s, vL, vR);
+    else if (order == 5) up5(s, vL, vR);
+    else if (order == 9) up9(s, vL, vR);
+    else                 up7(s, vL, vR);   /* order==7: s[0..7] */
+}
+
+/* ── HLLE flux in x ─────────────────────────────────────────────────────── */
+__device__ void
+hlle_x(const double UL[4], const double UR[4], double F[4])
+{
+    double pL, cL, uL, vL, pR, cR, uR, vR;
+    prim4(UL[0],UL[1],UL[2],UL[3], &pL,&cL,&uL,&vL);
+    prim4(UR[0],UR[1],UR[2],UR[3], &pR,&cR,&uR,&vR);
+
+    double FL[4] = { UL[1], UL[1]*uL+pL, UL[1]*vL, (UL[3]+pL)*uL };
+    double FR[4] = { UR[1], UR[1]*uR+pR, UR[1]*vR, (UR[3]+pR)*uR };
+
+    double SL = fmin(uL-cL, uR-cR);
+    double SR = fmax(uL+cL, uR+cR);
+    double dS = fmax(SR-SL, 1e-10);
+
+    if      (SL >= 0.0) { for (int q=0;q<4;q++) F[q] = FL[q]; }
+    else if (SR <= 0.0) { for (int q=0;q<4;q++) F[q] = FR[q]; }
+    else {
+        for (int q=0;q<4;q++)
+            F[q] = (SR*FL[q] - SL*FR[q] + SR*SL*(UR[q]-UL[q])) / dS;
+    }
+}
+
+/* ── HLLE flux in y ─────────────────────────────────────────────────────── */
+__device__ void
+hlle_y(const double UL[4], const double UR[4], double G[4])
+{
+    double pL, cL, uL, vL, pR, cR, uR, vR;
+    prim4(UL[0],UL[1],UL[2],UL[3], &pL,&cL,&uL,&vL);
+    prim4(UR[0],UR[1],UR[2],UR[3], &pR,&cR,&uR,&vR);
+
+    double GL[4] = { UL[2], UL[2]*uL, UL[2]*vL+pL, (UL[3]+pL)*vL };
+    double GR[4] = { UR[2], UR[2]*uR, UR[2]*vR+pR, (UR[3]+pR)*vR };
+
+    double SL = fmin(vL-cL, vR-cR);
+    double SR = fmax(vL+cL, vR+cR);
+    double dS = fmax(SR-SL, 1e-10);
+
+    if      (SL >= 0.0) { for (int q=0;q<4;q++) G[q] = GL[q]; }
+    else if (SR <= 0.0) { for (int q=0;q<4;q++) G[q] = GR[q]; }
+    else {
+        for (int q=0;q<4;q++)
+            G[q] = (SR*GL[q] - SL*GR[q] + SR*SL*(UR[q]-UL[q])) / dS;
+    }
+}
+
+/* ── HLLC flux in x ─────────────────────────────────────────────────────── */
+__device__ void
+hllc_x(const double UL[4], const double UR[4], double F[4])
+{
+    double pL, cL, uL, vL, pR, cR, uR, vR;
+    prim4(UL[0],UL[1],UL[2],UL[3], &pL,&cL,&uL,&vL);
+    prim4(UR[0],UR[1],UR[2],UR[3], &pR,&cR,&uR,&vR);
+
+    double SL = fmin(uL-cL, uR-cR);
+    double SR = fmax(uL+cL, uR+cR);
+
+    if (SL >= 0.0) {
+        F[0]=UL[1]; F[1]=UL[1]*uL+pL; F[2]=UL[1]*vL; F[3]=(UL[3]+pL)*uL;
+        return;
+    }
+    if (SR <= 0.0) {
+        F[0]=UR[1]; F[1]=UR[1]*uR+pR; F[2]=UR[1]*vR; F[3]=(UR[3]+pR)*uR;
+        return;
+    }
+
+    /* contact speed */
+    double dL = UL[0]*(SL-uL), dR = UR[0]*(SR-uR);
+    double Ss = (pR - pL + dL*uL - dR*uR) / (dL - dR);
+
+    /* pick star state on the correct side of contact */
+    const double *UK  = (Ss >= 0.0) ? UL : UR;
+    double pK   = (Ss >= 0.0) ? pL  : pR;
+    double uK   = (Ss >= 0.0) ? uL  : uR;
+    double vK   = (Ss >= 0.0) ? vL  : vR;
+    double SK   = (Ss >= 0.0) ? SL  : SR;
+    double fact = UK[0] * (SK - uK) / (SK - Ss);
+
+    double Us[4];
+    Us[0] = fact;
+    Us[1] = fact * Ss;
+    Us[2] = fact * vK;
+    Us[3] = fact * (UK[3]/UK[0] + (Ss - uK)*(Ss + pK/(UK[0]*(SK - uK))));
+
+    /* FK + SK*(U*K - UK) */
+    double FK[4] = { UK[1], UK[1]*uK+pK, UK[1]*vK, (UK[3]+pK)*uK };
+    for (int q = 0; q < 4; q++) F[q] = FK[q] + SK*(Us[q] - UK[q]);
+}
+
+/* ── HLLC flux in y ─────────────────────────────────────────────────────── */
+__device__ void
+hllc_y(const double UL[4], const double UR[4], double G[4])
+{
+    double pL, cL, uL, vL, pR, cR, uR, vR;
+    prim4(UL[0],UL[1],UL[2],UL[3], &pL,&cL,&uL,&vL);
+    prim4(UR[0],UR[1],UR[2],UR[3], &pR,&cR,&uR,&vR);
+
+    double SL = fmin(vL-cL, vR-cR);
+    double SR = fmax(vL+cL, vR+cR);
+
+    if (SL >= 0.0) {
+        G[0]=UL[2]; G[1]=UL[2]*uL; G[2]=UL[2]*vL+pL; G[3]=(UL[3]+pL)*vL;
+        return;
+    }
+    if (SR <= 0.0) {
+        G[0]=UR[2]; G[1]=UR[2]*uR; G[2]=UR[2]*vR+pR; G[3]=(UR[3]+pR)*vR;
+        return;
+    }
+
+    double dL = UL[0]*(SL-vL), dR = UR[0]*(SR-vR);
+    double Ss = (pR - pL + dL*vL - dR*vR) / (dL - dR);
+
+    const double *UK  = (Ss >= 0.0) ? UL : UR;
+    double pK   = (Ss >= 0.0) ? pL  : pR;
+    double uK   = (Ss >= 0.0) ? uL  : uR;
+    double vK   = (Ss >= 0.0) ? vL  : vR;
+    double SK   = (Ss >= 0.0) ? SL  : SR;
+    double fact = UK[0] * (SK - vK) / (SK - Ss);
+
+    double Us[4];
+    Us[0] = fact;
+    Us[1] = fact * uK;
+    Us[2] = fact * Ss;
+    Us[3] = fact * (UK[3]/UK[0] + (Ss - vK)*(Ss + pK/(UK[0]*(SK - vK))));
+
+    double GK[4] = { UK[2], UK[2]*uK, UK[2]*vK+pK, (UK[3]+pK)*vK };
+    for (int q = 0; q < 4; q++) G[q] = GK[q] + SK*(Us[q] - UK[q]);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Main RHS kernel  (grid-stride)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+__global__ void
+compute_rhs(const double * __restrict__ U,
+            double       * __restrict__ RHS,
+            double       * __restrict__ lam_out,
+            int N, double h, double C2, double Cg, double sc, int order)
+{
+    /* g = stencil half-width (cells upwind of interface):
+       order 3 → g=2, 5 → g=3, 7 → g=4, 9 → g=5              */
+    const int g  = (order + 1) / 2;   /* half-widths: 2,3,4,5  */
+    const int sw = 2 * g;             /* stencil width: 4,6,8,10 */
+
+    int N2 = N * N;
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < N2;
+             k += blockDim.x * gridDim.x) {
+    int j = k / N, i = k % N;
+
+    /* ── 10-slot stencil buffer (max UP9 width); fill only sw entries ── */
+    double s[10];
+
+    /* x−½  (cells i-g..i+(sw-g-1)) */
+    double ULm[4], URm[4];
+    for (int q = 0; q < 4; q++) {
+        for (int d = 0; d < sw; d++) s[d] = fetch(U, q, j, i-g+d, N);
+        up_recon(order, s, &ULm[q], &URm[q]);
+    }
+    double Fm[4];  hllc_x(ULm, URm, Fm);
+
+    /* x+½  (cells i-g+1..i+sw-g) */
+    double ULp[4], URp[4];
+    for (int q = 0; q < 4; q++) {
+        for (int d = 0; d < sw; d++) s[d] = fetch(U, q, j, i-g+1+d, N);
+        up_recon(order, s, &ULp[q], &URp[q]);
+    }
+    double Fp[4];  hllc_x(ULp, URp, Fp);
+
+    /* y−½  (cells j-g..j+(sw-g-1)) */
+    double VLm[4], VRm[4];
+    for (int q = 0; q < 4; q++) {
+        for (int d = 0; d < sw; d++) s[d] = fetch(U, q, j-g+d, i, N);
+        up_recon(order, s, &VLm[q], &VRm[q]);
+    }
+    double Gm[4];  hllc_y(VLm, VRm, Gm);
+
+    /* y+½  (cells j-g+1..j+sw-g) */
+    double VLp[4], VRp[4];
+    for (int q = 0; q < 4; q++) {
+        for (int d = 0; d < sw; d++) s[d] = fetch(U, q, j-g+1+d, i, N);
+        up_recon(order, s, &VLp[q], &VRp[q]);
+    }
+    double Gp[4];  hllc_y(VLp, VRp, Gp);
+
+    /* ── center-cell primitives ─────────────────────────────────────── */
+    double p0, c0, u0, v0;
+    prim4(fetch(U,0,j,i,N), fetch(U,1,j,i,N),
+          fetch(U,2,j,i,N), fetch(U,3,j,i,N), &p0,&c0,&u0,&v0);
+
+    /* ── Ducros sensor: 6th-order skew divergence ───────────────────── */
+    const double wc[6] = { -1., 9., -45., 45., -9., 1. };
+    const int    wo[6] = { -3, -2, -1, 1, 2, 3 };
+    double du_dx = 0., dv_dy = 0.;
+    for (int m = 0; m < 6; m++) {
+        double rx = fetch(U,0,j,i+wo[m],N); rx = rx>1e-14?rx:1e-14;
+        du_dx += wc[m] * (fetch(U,1,j,i+wo[m],N) / rx);
+        double ry = fetch(U,0,j+wo[m],i,N); ry = ry>1e-14?ry:1e-14;
+        dv_dy += wc[m] * (fetch(U,2,j+wo[m],i,N) / ry);
+    }
+    du_dx /= 60.*h;  dv_dy /= 60.*h;
+    double div_u = du_dx + dv_dy;
+    if (div_u > 0.) div_u = 0.;
+    double sos2 = (sc/(h*h)) * c0*c0;
+    double S_D  = (div_u*div_u) / (div_u*div_u + sos2 + 1e-40);
+
+    /* ── D2 artificial viscosity: fetch ±1 neighbors directly ──────── */
+    /* Use directional wave speeds: |u|+c for x-faces, |v|+c for y-faces */
+    double lam_c   = fabs(u0) + fabs(v0) + c0;   /* 2-D spectral radius for CFL */
+    double lamx_c  = fabs(u0) + c0;
+    double lamy_c  = fabs(v0) + c0;
+    double lhxp = 0.5*(lamx_c + lambda_x(fetch(U,0,j,i+1,N),fetch(U,1,j,i+1,N),fetch(U,2,j,i+1,N),fetch(U,3,j,i+1,N)));
+    double lhxm = 0.5*(lamx_c + lambda_x(fetch(U,0,j,i-1,N),fetch(U,1,j,i-1,N),fetch(U,2,j,i-1,N),fetch(U,3,j,i-1,N)));
+    double lhyp = 0.5*(lamy_c + lambda_y(fetch(U,0,j+1,i,N),fetch(U,1,j+1,i,N),fetch(U,2,j+1,i,N),fetch(U,3,j+1,i,N)));
+    double lhym = 0.5*(lamy_c + lambda_y(fetch(U,0,j-1,i,N),fetch(U,1,j-1,i,N),fetch(U,2,j-1,i,N),fetch(U,3,j-1,i,N)));
+
+    double D2[4];
+    for (int q = 0; q < 4; q++) {
+        double Uc  = fetch(U,q,j,  i,  N);
+        double Uxp = fetch(U,q,j,  i+1,N), Uxm = fetch(U,q,j,  i-1,N);
+        double Uyp = fetch(U,q,j+1,i,  N), Uym = fetch(U,q,j-1,i,  N);
+        double dxp = Uxp-Uc, dxm = Uc-Uxm, dyp = Uyp-Uc, dym = Uc-Uym;
+        /* Ducros-gated D2: active at shocks (S_D → 1) */
+        double d2_duc = (C2/h) * (lhxp*S_D*dxp - lhxm*S_D*dxm
+                                + lhyp*S_D*dyp - lhym*S_D*dym);
+        /* Global LF D2: active in smooth regions (1 - S_D → 1) */
+        double d2_glb = (Cg/h) * (lhxp*(1.-S_D)*dxp - lhxm*(1.-S_D)*dxm
+                                + lhyp*(1.-S_D)*dyp - lhym*(1.-S_D)*dym);
+        D2[q] = d2_duc + d2_glb;
+    }
+
+    /* ── assemble ─────────────────────────────────────────────────────── */
+    for (int q = 0; q < 4; q++)
+        RHS[IDX(q,j,i,N)] = -(Fp[q]-Fm[q])/h - (Gp[q]-Gm[q])/h + D2[q];
+
+    lam_out[j*N + i] = lam_c;
+    } /* grid-stride loop */
+}
+
+/* ── sensor-only kernel (post-processing, grid-stride) ────────────────── */
+__global__ void
+compute_sensor(const double * __restrict__ U,
+               double       * __restrict__ SD,
+               int N, double h, double sc)
+{
+    int N2 = N * N;
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < N2;
+             k += blockDim.x * gridDim.x) {
+    int j = k / N, i = k % N;
+
+    double p0, c0, u0, v0;
+    prim4(fetch(U,0,j,i,N), fetch(U,1,j,i,N),
+          fetch(U,2,j,i,N), fetch(U,3,j,i,N), &p0,&c0,&u0,&v0);
+
+    double u_s[7], v_s[7];
+    for (int k = 0; k < 7; k++) {
+        double r;
+        r = fetch(U,0,j,i+k-3,N); r = r>1e-14?r:1e-14;
+        u_s[k] = fetch(U,1,j,i+k-3,N) / r;
+        r = fetch(U,0,j+k-3,i,N); r = r>1e-14?r:1e-14;
+        v_s[k] = fetch(U,2,j+k-3,i,N) / r;
+    }
+    double coeff[6]={-1.,9.,-45.,45.,-9.,1.};
+    int cidx[6]={0,1,2,4,5,6};
+    double du_dx=0., dv_dy=0.;
+    for (int k=0;k<6;k++){
+        du_dx += coeff[k]*u_s[cidx[k]];
+        dv_dy += coeff[k]*v_s[cidx[k]];
+    }
+    du_dx /= 60.*h; dv_dy /= 60.*h;
+    double div_u = du_dx+dv_dy;
+    if (div_u>0.) div_u=0.;
+    double sos2 = (sc/(h*h))*c0*c0;
+    SD[j*N+i] = (div_u*div_u)/(div_u*div_u+sos2+1e-40);
+    } /* grid-stride loop */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SSP-RK3 update kernels  (grid-stride)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+__global__ void rk3_s1(double*U1,const double*U0,const double*L,double dt,int M){
+    for(int k=blockIdx.x*blockDim.x+threadIdx.x; k<M; k+=blockDim.x*gridDim.x)
+        U1[k]=U0[k]+dt*L[k]; }
+
+__global__ void rk3_s2(double*U2,const double*U0,const double*U1,
+                       const double*L,double dt,int M){
+    for(int k=blockIdx.x*blockDim.x+threadIdx.x; k<M; k+=blockDim.x*gridDim.x)
+        U2[k]=0.75*U0[k]+0.25*(U1[k]+dt*L[k]); }
+
+__global__ void rk3_s3(double*U,const double*U0,const double*U2,
+                       const double*L,double dt,int M){
+    for(int k=blockIdx.x*blockDim.x+threadIdx.x; k<M; k+=blockDim.x*gridDim.x)
+        U[k]=(1./3.)*U0[k]+(2./3.)*(U2[k]+dt*L[k]); }
+
+/* ── max reduction (grid-stride two-pass) ──────────────────────────────── */
+__global__ void reduce_max(const double*in, double*out, int n){
+    extern __shared__ double sm[];
+    int tid = threadIdx.x;
+    double v = 0.;
+    for (int k = blockIdx.x*blockDim.x + tid; k < n; k += blockDim.x*gridDim.x)
+        v = fmax(v, in[k]);
+    sm[tid] = v; __syncthreads();
+    for (int s = BLOCK1D/2; s > 0; s >>= 1){
+        if (tid < s) sm[tid] = fmax(sm[tid], sm[tid+s]);
+        __syncthreads();
+    }
+    if (tid == 0) out[blockIdx.x] = sm[0];
+}
+
+static double gpu_max(const double*d_in, double*d_tmp, int n){
+    reduce_max<<<GS_NBLK,BLOCK1D,BLOCK1D*sizeof(double)>>>(d_in,d_tmp,n);
+    reduce_max<<<1,BLOCK1D,BLOCK1D*sizeof(double)>>>(d_tmp,d_tmp,GS_NBLK);
+    double v; CK(cudaMemcpy(&v,d_tmp,sizeof(double),cudaMemcpyDeviceToHost));
+    return v;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * IC kernel  (grid-stride)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+__global__ void
+ic_kernel(double*U, int N, double h)
+{
+    int N2 = N * N;
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < N2;
+             k += blockDim.x * gridDim.x) {
+    int j = k / N, i = k % N;
+
+    double xc=(i+0.5)*h, yc=(j+0.5)*h;
+    double r=sqrt((xc-0.5)*(xc-0.5)+(yc-0.5)*(yc-0.5));
+    double delta=1.0*h;
+    double phi=0.5*(1.+tanh((0.25-r)/delta));
+    double rho=0.125+9.875*phi;
+    double p  =0.1  +9.9  *phi;
+    U[IDX(0,j,i,N)]=rho;
+    U[IDX(1,j,i,N)]=0.;
+    U[IDX(2,j,i,N)]=0.;
+    U[IDX(3,j,i,N)]=p/(GAMMA_V-1.);
+    } /* grid-stride loop */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PPM output
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Plasma colormap (256 entries), sampled from matplotlib */
+static const unsigned char PLASMA[256][3] = {
+{13,8,135},{16,7,136},{19,7,137},{22,7,138},{25,6,140},{27,6,141},
+{29,6,142},{32,6,143},{34,5,144},{36,5,145},{38,5,145},{40,4,146},
+{42,4,147},{44,4,148},{46,4,149},{47,3,150},{49,3,151},{51,3,152},
+{53,3,153},{55,2,154},{57,2,155},{58,2,156},{60,2,157},{62,1,158},
+{64,1,159},{65,1,160},{67,1,161},{69,0,162},{70,0,163},{72,0,164},
+{74,0,165},{75,0,166},{77,0,167},{79,0,168},{80,0,168},{82,0,169},
+{84,0,170},{85,0,171},{87,0,172},{89,0,173},{90,1,173},{92,1,174},
+{94,1,175},{95,2,176},{97,2,176},{99,3,177},{100,4,178},{102,4,178},
+{104,5,179},{105,6,180},{107,7,180},{109,7,181},{110,8,182},{112,9,182},
+{114,10,183},{115,11,183},{117,12,184},{119,13,184},{120,14,185},
+{122,15,185},{124,16,186},{125,17,186},{127,18,187},{129,19,187},
+{130,20,188},{132,21,188},{134,22,189},{135,23,189},{137,25,190},
+{139,26,190},{141,27,190},{142,28,191},{144,29,191},{146,30,191},
+{147,32,192},{149,33,192},{151,34,192},{153,35,193},{154,36,193},
+{156,38,193},{158,39,193},{159,40,194},{161,42,194},{163,43,194},
+{165,44,194},{166,45,195},{168,47,195},{170,48,195},{171,49,195},
+{173,51,195},{175,52,196},{176,54,196},{178,55,196},{180,56,196},
+{182,58,196},{183,59,196},{185,61,196},{187,62,196},{188,64,196},
+{190,66,196},{192,67,196},{194,69,196},{195,70,196},{197,72,196},
+{199,74,196},{200,75,196},{202,77,196},{204,79,196},{205,80,196},
+{207,82,196},{209,84,195},{210,85,195},{212,87,195},{214,89,195},
+{215,91,195},{217,93,194},{219,94,194},{220,96,194},{222,98,193},
+{224,100,193},{225,101,193},{227,103,192},{229,105,192},{230,107,191},
+{232,109,191},{233,111,190},{235,113,190},{237,114,189},{238,116,189},
+{240,118,188},{241,120,187},{243,122,187},{244,124,186},{246,126,185},
+{247,128,185},{249,130,184},{250,132,183},{251,134,182},{253,136,181},
+{254,138,181},{254,140,180},{254,142,179},{254,144,178},{254,146,177},
+{254,148,175},{254,151,174},{254,153,173},{254,155,172},{254,157,171},
+{254,159,169},{254,161,168},{254,163,167},{254,165,165},{254,167,164},
+{254,169,163},{254,171,161},{254,173,160},{254,175,158},{254,177,157},
+{254,179,155},{254,181,154},{254,183,152},{254,185,151},{254,187,149},
+{254,189,148},{254,191,146},{254,193,144},{254,195,143},{254,197,141},
+{254,199,139},{254,201,138},{254,203,136},{254,206,134},{254,208,132},
+{254,210,131},{254,212,129},{254,214,127},{254,216,125},{254,218,124},
+{254,220,122},{254,222,120},{254,224,118},{254,226,116},{254,228,115},
+{254,230,113},{254,232,111},{254,234,109},{254,236,107},{254,238,105},
+{254,240,103},{254,242,101},{254,244,99},{253,246,98},{253,248,96},
+{253,250,94},{253,252,92},{252,254,90},{252,254,89},{252,254,87},
+{252,254,85},{252,254,83},{251,254,81},{251,254,79},{251,254,77},
+{250,254,75},{250,254,73},{249,254,71},{249,253,69},{248,253,68},
+{248,253,66},{247,253,64},{247,253,62},{246,253,60},{246,252,58},
+{245,252,56},{244,252,54},{244,252,52},{243,252,50},{242,252,48},
+{242,251,46},{241,251,44},{240,251,42},{240,251,40},{239,250,38},
+{238,250,36},{237,250,34},{237,249,32},{236,249,30},{235,249,28},
+{234,248,26},{233,248,24},{232,247,22},{231,247,20},{231,246,18},
+{230,246,16},{229,245,14},{228,245,12},{227,244,10},{226,244,8},
+{225,243,6},{224,243,4},{223,242,2},{222,242,0}
+};
+
+/* Viridis colormap (256 entries) */
+static const unsigned char VIRIDIS[256][3] = {
+{68,1,84},{68,2,86},{69,4,87},{69,5,89},{70,7,90},{70,8,92},
+{70,10,93},{70,11,94},{71,13,96},{71,14,97},{71,16,99},{71,17,100},
+{71,19,101},{72,20,103},{72,22,104},{72,23,105},{72,25,107},{72,26,108},
+{72,28,110},{72,29,111},{72,31,112},{72,32,113},{72,34,115},{72,35,116},
+{72,37,117},{72,38,118},{72,40,119},{72,41,121},{72,43,122},{71,45,123},
+{71,46,124},{71,48,125},{71,49,126},{71,51,127},{71,52,128},{70,54,129},
+{70,55,130},{70,57,131},{70,58,132},{70,60,133},{70,61,134},{69,63,135},
+{69,64,135},{69,66,136},{69,67,137},{69,69,138},{68,70,139},{68,72,140},
+{68,73,140},{67,75,141},{67,76,142},{67,78,142},{67,79,143},{66,81,144},
+{66,82,144},{65,84,145},{65,85,146},{65,87,146},{64,88,147},{64,90,148},
+{63,91,148},{63,93,149},{63,94,149},{62,96,150},{62,97,150},{61,99,151},
+{61,100,151},{60,102,152},{60,103,152},{59,105,153},{59,106,153},
+{58,108,153},{58,109,154},{57,111,154},{57,112,155},{56,114,155},
+{56,115,155},{55,117,156},{55,118,156},{54,120,157},{54,121,157},
+{53,123,157},{53,124,157},{52,126,158},{52,127,158},{51,129,158},
+{50,130,159},{50,132,159},{49,133,159},{49,135,160},{48,136,160},
+{48,138,160},{47,140,161},{46,141,161},{46,143,161},{45,144,162},
+{45,146,162},{44,147,162},{44,149,162},{43,151,163},{42,152,163},
+{42,154,163},{41,155,163},{41,157,164},{40,159,164},{39,160,164},
+{39,162,164},{38,164,165},{38,165,165},{37,167,165},{36,169,165},
+{36,170,165},{35,172,166},{35,174,166},{34,175,166},{34,177,166},
+{33,179,167},{32,180,167},{32,182,167},{31,184,167},{30,185,167},
+{30,187,167},{29,189,168},{28,191,168},{28,192,168},{27,194,168},
+{27,196,168},{26,197,168},{25,199,168},{24,201,169},{24,203,169},
+{23,204,169},{22,206,169},{22,208,169},{21,210,169},{20,212,169},
+{20,213,169},{19,215,169},{18,217,169},{17,219,169},{17,221,169},
+{16,222,169},{15,224,169},{14,226,169},{14,228,169},{13,230,169},
+{12,232,169},{11,234,169},{11,235,169},{10,237,169},{9,239,169},
+{8,241,169},{8,243,168},{7,245,168},{6,247,168},{5,248,168},
+{5,250,167},{4,252,167},{3,254,167},{2,254,166},{2,254,164},
+{1,254,163},{1,254,162},{0,254,160},{0,254,159},{0,253,157},
+{1,253,156},{1,253,154},{2,253,153},{3,253,152},{4,252,150},
+{5,252,149},{7,252,147},{8,252,146},{9,251,144},{11,251,143},
+{12,251,141},{13,250,140},{15,250,138},{16,249,137},{18,249,135},
+{20,249,133},{21,248,132},{23,248,130},{24,247,129},{26,247,127},
+{28,246,125},{30,246,124},{31,245,122},{33,244,120},{35,244,119},
+{37,243,117},{38,243,115},{40,242,113},{42,241,112},{44,241,110},
+{46,240,108},{48,239,106},{50,239,104},{52,238,103},{54,237,101},
+{56,237,99},{58,236,97},{61,235,95},{63,234,93},{65,233,91},
+{67,233,89},{70,232,87},{72,231,85},{74,230,83},{77,229,81},
+{79,228,79},{82,228,77},{84,227,75},{87,226,73},{89,225,71},
+{92,224,69},{94,223,67},{97,222,64},{99,221,62},{102,220,60},
+{105,219,58},{107,218,56},{110,217,54},{113,216,52},{116,215,50},
+{118,214,48},{121,213,45},{124,211,43},{127,210,41},{130,209,39},
+{133,208,37},{136,206,35},{139,205,33},{142,204,31},{145,203,28},
+{148,201,26},{151,200,24},{154,198,22},{157,197,20},{160,196,18},
+{164,194,16},{167,193,14},{170,191,12},{173,190,10},{177,188,8},
+{180,187,6},{183,185,3},{187,184,1},{190,182,2},{193,181,4},
+{197,179,6},{200,178,8},{203,176,10},{207,175,13},{210,173,16}
+};
+
+/* Hot colormap (black->red->yellow->white) */
+static void hot_rgb(double t, unsigned char *r, unsigned char *g, unsigned char *b)
+{
+    if      (t < 1./3.) { *r=(unsigned char)(t*3.*255); *g=0; *b=0; }
+    else if (t < 2./3.) { *r=255; *g=(unsigned char)((t-1./3.)*3.*255); *b=0; }
+    else                { *r=255; *g=255; *b=(unsigned char)((t-2./3.)*3.*255); }
+}
+
+static void
+write_ppm(const char *fname, const double *data, int N,
+          double vmin, double vmax, int cmap)
+{
+    /* cmap: 0=plasma, 1=viridis, 2=hot */
+    FILE *f = fopen(fname, "wb");
+    if (!f) { fprintf(stderr, "Cannot open %s\n", fname); return; }
+    fprintf(f, "P6\n%d %d\n255\n", N, N);
+
+    unsigned char pix[3];
+    for (int jj = N-1; jj >= 0; jj--) {          /* flip y: j=0 at bottom */
+        for (int ii = 0; ii < N; ii++) {
+            double t = (data[jj*N + ii] - vmin) / (vmax - vmin + 1e-30);
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            int idx = (int)(t * 255.0);
+            if (cmap == 0)      { pix[0]=PLASMA[idx][0]; pix[1]=PLASMA[idx][1]; pix[2]=PLASMA[idx][2]; }
+            else if (cmap == 1) { pix[0]=VIRIDIS[idx][0];pix[1]=VIRIDIS[idx][1];pix[2]=VIRIDIS[idx][2];}
+            else                { hot_rgb(t, &pix[0], &pix[1], &pix[2]); }
+            fwrite(pix, 1, 3, f);
+        }
+    }
+    fclose(f);
+    printf("  Saved %s\n", fname);
+}
+
+/* Blue-white-red diverging colormap (for vorticity) */
+static void bwr_rgb(double t, unsigned char *r, unsigned char *g, unsigned char *b)
+{
+    if (t < 0.5) {
+        *r = (unsigned char)(t * 2.0 * 255);
+        *g = (unsigned char)(t * 2.0 * 255);
+        *b = 255;
+    } else {
+        *r = 255;
+        *g = (unsigned char)((1.0 - t) * 2.0 * 255);
+        *b = (unsigned char)((1.0 - t) * 2.0 * 255);
+    }
+}
+
+/* Compute vorticity (dv/dx - du/dy) and velocity magnitude on GPU (grid-stride) */
+__global__ void
+compute_derived(const double * __restrict__ U,
+                double       * __restrict__ vort,
+                double       * __restrict__ vmag,
+                int N, double h)
+{
+    int N2 = N * N;
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < N2;
+             k += blockDim.x * gridDim.x) {
+    int j = k / N, i = k % N;
+
+    /* 6th-order skew-symmetric stencil offsets and coefficients */
+    const double coeff[6] = {-1., 9., -45., 45., -9., 1.};
+    const int    off[6]   = {-3, -2, -1,  1,  2,  3};
+
+    double dv_dx = 0., du_dy = 0.;
+    for (int k = 0; k < 6; k++) {
+        double rho_x = fetch(U, 0, j, i + off[k], N);
+        rho_x = rho_x > 1e-14 ? rho_x : 1e-14;
+        dv_dx += coeff[k] * (fetch(U, 2, j, i + off[k], N) / rho_x);
+
+        double rho_y = fetch(U, 0, j + off[k], i, N);
+        rho_y = rho_y > 1e-14 ? rho_y : 1e-14;
+        du_dy += coeff[k] * (fetch(U, 1, j + off[k], i, N) / rho_y);
+    }
+    vort[j*N + i] = (dv_dx - du_dy) / (60.0 * h);
+
+    /* velocity magnitude using centre cell */
+    double rho = fetch(U, 0, j, i, N);
+    rho = rho > 1e-14 ? rho : 1e-14;
+    double u = fetch(U, 1, j, i, N) / rho;
+    double v = fetch(U, 2, j, i, N) / rho;
+    vmag[j*N + i] = sqrt(u*u + v*v);
+    } /* grid-stride loop */
+}
+
+/* Write a 2N×2N composite PPM.  Layout (physical coordinates):
+ *   top-left  | top-right
+ *   ----------+----------
+ *   bot-left  | bot-right
+ * cmap: 0=plasma, 1=viridis, 2=hot, 3=bwr
+ */
+static void
+write_ppm_2x2(const char *fname,
+              const double *tl, double tl_min, double tl_max, int tl_cmap,
+              const double *tr, double tr_min, double tr_max, int tr_cmap,
+              const double *bl, double bl_min, double bl_max, int bl_cmap,
+              const double *br, double br_min, double br_max, int br_cmap,
+              int N)
+{
+    FILE *f = fopen(fname, "wb");
+    if (!f) { fprintf(stderr, "Cannot open %s\n", fname); return; }
+    fprintf(f, "P6\n%d %d\n255\n", 2*N, 2*N);
+
+    unsigned char pix[3];
+    for (int r = 0; r < 2*N; r++) {        /* r=0 is the top of the image */
+        int phys_j = 2*N - 1 - r;          /* y-flip: phys_j=0 → bottom  */
+        for (int c = 0; c < 2*N; c++) {
+            const double *panel;
+            double vmin, vmax;
+            int cmap, sub_j, sub_i;
+
+            if (phys_j >= N) {              /* top row of panels */
+                sub_j = phys_j - N;
+                if (c < N) { panel=tl; vmin=tl_min; vmax=tl_max; cmap=tl_cmap; sub_i=c;   }
+                else        { panel=tr; vmin=tr_min; vmax=tr_max; cmap=tr_cmap; sub_i=c-N; }
+            } else {                        /* bottom row of panels */
+                sub_j = phys_j;
+                if (c < N) { panel=bl; vmin=bl_min; vmax=bl_max; cmap=bl_cmap; sub_i=c;   }
+                else        { panel=br; vmin=br_min; vmax=br_max; cmap=br_cmap; sub_i=c-N; }
+            }
+
+            double t = (panel[sub_j*N + sub_i] - vmin) / (vmax - vmin + 1e-30);
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            int idx = (int)(t * 255.0);
+            if      (cmap == 0) { pix[0]=PLASMA[idx][0];  pix[1]=PLASMA[idx][1];  pix[2]=PLASMA[idx][2];  }
+            else if (cmap == 1) { pix[0]=VIRIDIS[idx][0]; pix[1]=VIRIDIS[idx][1]; pix[2]=VIRIDIS[idx][2]; }
+            else if (cmap == 2) { hot_rgb(t, &pix[0], &pix[1], &pix[2]); }
+            else                { bwr_rgb(t, &pix[0], &pix[1], &pix[2]); }
+            fwrite(pix, 1, 3, f);
+        }
+    }
+    fclose(f);
+    printf("  Saved %s\n", fname);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * main
+ * ═══════════════════════════════════════════════════════════════════════════ */
+int main(int argc, char **argv)
+{
+    int    N     = (argc > 1) ? atoi(argv[1]) : 400;
+    double C2    = (argc > 2) ? atof(argv[2]) : 0.5;   /* Ducros D2 coeff */
+    double Cg    = (argc > 3) ? atof(argv[3]) : 0.0;   /* global LF coeff */
+    double sc    = (argc > 4) ? atof(argv[4]) : 0.05;
+    int    order = (argc > 5) ? atoi(argv[5]) : 5;
+    /* validate order: only 3, 5, 7, 9 are supported */
+    if (order != 3 && order != 5 && order != 7 && order != 9) {
+        fprintf(stderr, "order must be 3, 5, 7, or 9 (got %d)\n", order);
+        return 1;
+    }
+    double CFL = 0.40, t_end = 1.0, h = 1.0 / N;
+
+    /* GPU info */
+    int dev; cudaDeviceProp prop;
+    CK(cudaGetDevice(&dev));
+    CK(cudaGetDeviceProperties(&prop, dev));
+    printf("========================================================\n");
+    printf("  Device  : %s\n", prop.name);
+    printf("  UP%d+HLLC+Ducros FV 2D  --  Circular Sod\n", order);
+    printf("  n=%dx%d  h=%.5f  C2=%.3f  Cg=%.4f  sc=%.4f  CFL=%.2f  order=%d\n",
+           N, N, h, C2, Cg, sc, CFL, order);
+    printf("========================================================\n");
+
+    /* allocate */
+    size_t sz1 = N * N * sizeof(double);
+    size_t sz4 = 4 * sz1;
+    double *d_U, *d_U0, *d_U1, *d_U2, *d_RHS, *d_lam, *d_tmp, *d_SD, *d_vort, *d_vmag;
+    CK(cudaMalloc(&d_U,    sz4));
+    CK(cudaMalloc(&d_U0,   sz4));
+    CK(cudaMalloc(&d_U1,   sz4));
+    CK(cudaMalloc(&d_U2,   sz4));
+    CK(cudaMalloc(&d_RHS,  sz4));
+    CK(cudaMalloc(&d_lam,  sz1));
+    CK(cudaMalloc(&d_SD,   sz1));
+    CK(cudaMalloc(&d_vort, sz1));
+    CK(cudaMalloc(&d_vmag, sz1));
+    /* tmp for max reduction: one partial result per GS_NBLK block */
+    CK(cudaMalloc(&d_tmp, GS_NBLK * sizeof(double)));
+
+    int  M   = 4 * N * N;
+
+    double *h_rho  = (double*)malloc(sz1);
+    double *h_p    = (double*)malloc(sz1);
+    double *h_sd   = (double*)malloc(sz1);
+    double *h_rhou = (double*)malloc(sz1);
+    double *h_rhov = (double*)malloc(sz1);
+    double *h_E    = (double*)malloc(sz1);
+    double *h_vort = (double*)malloc(sz1);
+    double *h_vmag = (double*)malloc(sz1);
+
+    /* ── helper: download fields, compute pressure, write 3 PPMs ──────── */
+    /* color scale fixed to IC extremes for temporal consistency           */
+    const double RHO_MIN = 0.125, RHO_MAX = 10.1;
+
+    /* local lambda via nested function trick — use a macro instead */
+#define WRITE_FRAME(frame_idx) do { \
+    CK(cudaMemcpy(h_rho,  d_U + 0*N*N, sz1, cudaMemcpyDeviceToHost)); \
+    CK(cudaMemcpy(h_rhou, d_U + 1*N*N, sz1, cudaMemcpyDeviceToHost)); \
+    CK(cudaMemcpy(h_rhov, d_U + 2*N*N, sz1, cudaMemcpyDeviceToHost)); \
+    CK(cudaMemcpy(h_E,    d_U + 3*N*N, sz1, cudaMemcpyDeviceToHost)); \
+    compute_sensor <<<GS_NBLK, BLOCK1D>>>(d_U, d_SD,   N, h, sc); \
+    compute_derived<<<GS_NBLK, BLOCK1D>>>(d_U, d_vort, d_vmag, N, h); \
+    CK(cudaDeviceSynchronize()); \
+    CK(cudaMemcpy(h_sd,   d_SD,   sz1, cudaMemcpyDeviceToHost)); \
+    CK(cudaMemcpy(h_vort, d_vort, sz1, cudaMemcpyDeviceToHost)); \
+    CK(cudaMemcpy(h_vmag, d_vmag, sz1, cudaMemcpyDeviceToHost)); \
+    for (int _k = 0; _k < N*N; _k++) { \
+        double _u = h_rhou[_k]/h_rho[_k], _v = h_rhov[_k]/h_rho[_k]; \
+        h_p[_k] = (GAMMA_V-1.)*(h_E[_k] - 0.5*(h_rhou[_k]*_u + h_rhov[_k]*_v)); \
+    } \
+    /* symmetric vorticity color range */ \
+    double _wmax = 1e-10; \
+    for (int _k = 0; _k < N*N; _k++) { \
+        double _aw = h_vort[_k] < 0.0 ? -h_vort[_k] : h_vort[_k]; \
+        if (_aw > _wmax) _wmax = _aw; \
+    } \
+    /* velocity magnitude range 0..max */ \
+    double _vmax = 1e-10; \
+    for (int _k = 0; _k < N*N; _k++) \
+        if (h_vmag[_k] > _vmax) _vmax = h_vmag[_k]; \
+    char _fn[64]; \
+    sprintf(_fn, "sod_%04d.ppm", (frame_idx)); \
+    write_ppm_2x2(_fn, \
+        h_rho,  RHO_MIN, RHO_MAX, 0, \
+        h_vort, -_wmax,  _wmax,   3, \
+        h_sd,   0.0,     1.0,     2, \
+        h_vmag, 0.0,     _vmax,   1, \
+        N); \
+} while(0)
+
+    /* IC */
+    ic_kernel<<<GS_NBLK, BLOCK1D>>>(d_U, N, h);
+    CK(cudaDeviceSynchronize());
+
+    /* frame 0 at t=0 */
+    WRITE_FRAME(0);
+
+    /* time loop */
+    const int  N_FRAMES  = 10;
+    int    frame     = 1;
+    double t_next    = t_end / N_FRAMES;    /* next frame target time */
+    int    step = 0;
+    double t    = 0.0;
+    struct timespec ts0, ts1;
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+
+    while (t < t_end) {
+        /* compute RHS + lam_max to get dt */
+        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U, d_RHS, d_lam, N, h, C2, Cg, sc, order);
+        double lam_max = gpu_max(d_lam, d_tmp, N*N);
+        double dt = CFL * h / lam_max;
+        /* clamp to next frame boundary or t_end, whichever is closer */
+        double t_target = (t_next < t_end) ? t_next : t_end;
+        if (t + dt > t_target) dt = t_target - t;
+        if (dt < 1e-14) break;
+
+        /* SSP-RK3 */
+        CK(cudaMemcpy(d_U0, d_U, sz4, cudaMemcpyDeviceToDevice));
+
+        /* stage 1: U1 = U0 + dt*L(U0)   [RHS already in d_RHS] */
+        rk3_s1<<<GS_NBLK, BLOCK1D>>>(d_U1, d_U0, d_RHS, dt, M);
+
+        /* stage 2 */
+        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U1, d_RHS, d_lam, N, h, C2, Cg, sc, order);
+        rk3_s2<<<GS_NBLK, BLOCK1D>>>(d_U2, d_U0, d_U1, d_RHS, dt, M);
+
+        /* stage 3 */
+        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U2, d_RHS, d_lam, N, h, C2, Cg, sc, order);
+        rk3_s3<<<GS_NBLK, BLOCK1D>>>(d_U, d_U0, d_U2, d_RHS, dt, M);
+
+        t += dt; step++;
+
+        /* check frame boundary */
+        if (t >= t_next - 1e-12 && frame <= N_FRAMES) {
+            clock_gettime(CLOCK_MONOTONIC, &ts1);
+            double el = (ts1.tv_sec-ts0.tv_sec)+(ts1.tv_nsec-ts0.tv_nsec)*1e-9;
+            printf("  frame %2d/%d  step %5d  t=%.5f  elapsed=%.1fs\n",
+                   frame, N_FRAMES, step, t, el);
+            fflush(stdout);
+            WRITE_FRAME(frame);
+            frame++;
+            t_next = frame * t_end / N_FRAMES;
+        } else if (step % 50 == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &ts1);
+            double el = (ts1.tv_sec-ts0.tv_sec)+(ts1.tv_nsec-ts0.tv_nsec)*1e-9;
+            double eta = (t > 0) ? (t_end-t)/t*el : 0;
+            printf("  step %5d  t=%.5f  dt=%.3e  elapsed=%.1fs  ETA=%.0fs\n",
+                   step, t, dt, el, eta);
+            fflush(stdout);
+        }
+    }
+    CK(cudaDeviceSynchronize());
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    double wall = (ts1.tv_sec-ts0.tv_sec)+(ts1.tv_nsec-ts0.tv_nsec)*1e-9;
+    printf("  Done: %d steps,  t=%.6f,  wall=%.2fs\n", step, t, wall);
+    printf("  Frames written: sod_0000.ppm .. sod_%04d.ppm  (2x2 composite)\n", N_FRAMES);
+
+    /* cleanup */
+    free(h_rho); free(h_p); free(h_sd);
+    free(h_rhou); free(h_rhov); free(h_E);
+    free(h_vort); free(h_vmag);
+    cudaFree(d_U); cudaFree(d_U0); cudaFree(d_U1); cudaFree(d_U2);
+    cudaFree(d_RHS); cudaFree(d_lam); cudaFree(d_tmp); cudaFree(d_SD);
+    cudaFree(d_vort); cudaFree(d_vmag);
+    return 0;
+}
