@@ -1,16 +1,26 @@
 /*
- * rt_dg_euler_2d.cu
- * Mixed DG/FV — RT0 momentum + P0 density/energy:
+ * p1_dg_euler_2d.cu
+ * Mixed DG/FV — FULL-LINEAR (P1) momentum + P0 density/energy:
  *   density ρ   : P0 (piecewise constant, cell average)
- *   momentum m  : RT0 (Raviart-Thomas, normal-flux DOF per face)
+ *   momentum m  : P1 vector — EACH component carries the full linear basis {1,ξ,η}
+ *                   ρu = mxa + mxs·ξ + mxsy·η     (3 DOF)
+ *                   ρv = mya + mysx·ξ + mys·η     (3 DOF)
+ *                 Full linear space, NOT bilinear (no ξη term), and NOT the
+ *                 div-conforming RT0 subspace (which drops mxsy, mysx).
  *   energy E    : P0 (piecewise constant, cell average)
  *   Riemann     : HLLC (default; override with -Driemann_n=roe_n|hll_n)
  *   Time        : SSP-RK3
  *   Quadrature  : 1-point (face midpoint) for all boundary integrals
- *   Volume term : analytic (RT0 quadratic form)
+ *   Volume term : analytic (P1 quadratic forms, incl. cross ρuv term)
+ *   Precision   : DOUBLE  (real = reall = double) — needed to see whether the
+ *                 low-Mach stationary state survives without float noise.
+ *
+ * Derived from rt_dg_euler_2d.cu.  Experiment: does the full P1 momentum space
+ * still preserve low-Mach stationary states (Gresho / low-Mach vortex,
+ * ./p1_dg N lmv [eps]) the way the RT0 space does?
  *
  * Compile:
- *   nvcc -O3 -arch=native --expt-relaxed-constexpr -o rt_dg rt_dg_euler_2d.cu -lm
+ *   nvcc -O3 -arch=native --expt-relaxed-constexpr -o p1_dg p1_dg_euler_2d.cu -lm
  *
  * Test cases (Barsukow, Ciallella, Ricchiuto, Torlo 2025 — arXiv:2506.21700):
  *
@@ -42,23 +52,31 @@
 #define BLOCK1D  256
 #define GS_NBLK  256
 
-/* DOF indices in the padded state array (NVAR = 6) */
-#define NVAR  6
+/* DOF indices in the padded state array (NVAR = 8, full-P1 momentum) */
+#define NVAR  8
 #define Q_RHO  0   /* density                      (P0)          */
-#define Q_MXA  1   /* x-momentum cell average      (RT0 mode 0)  */
-#define Q_MXS  2   /* x-momentum x-slope           (RT0 mode 1)  */
-#define Q_MYA  3   /* y-momentum cell average      (RT0 mode 0)  */
-#define Q_MYS  4   /* y-momentum y-slope           (RT0 mode 1)  */
-#define Q_E    5   /* total energy                 (P0)          */
+#define Q_MXA  1   /* x-momentum cell average      (P1 mode 1)   */
+#define Q_MXS  2   /* x-momentum ξ-slope  (∂x)     (P1 mode ξ)   */
+#define Q_MXSY 3   /* x-momentum η-slope  (∂y)     (P1 mode η)   [NEW vs RT0] */
+#define Q_MYA  4   /* y-momentum cell average      (P1 mode 1)   */
+#define Q_MYSX 5   /* y-momentum ξ-slope  (∂x)     (P1 mode ξ)   [NEW vs RT0] */
+#define Q_MYS  6   /* y-momentum η-slope  (∂y)     (P1 mode η)   */
+#define Q_E    7   /* total energy                 (P0)          */
 
 /*
- * Modal ↔ nodal RT0 relations  (ξ = 2(x-xc)/h ∈ [-1,1]):
- *   (ρu)(ξ) = mxa + mxs·ξ      cell-avg = mxa,  slope·h/2 = mxs
- *   mr = (ρu)(+1) = mxa + mxs  (outward flux, right face)
- *   ml = -(ρu)(-1) = -(mxa-mxs)= mxs - mxa  (outward flux, left face)
+ * Modal ↔ nodal P1 relations  (ξ = 2(x-xc)/h ∈ [-1,1], η = 2(y-yc)/h ∈ [-1,1]):
+ *   (ρu)(ξ,η) = mxa + mxs·ξ + mxsy·η
+ *   (ρv)(ξ,η) = mya + mysx·ξ + mys·η
  *
- *   Inverse:  mxa = (mr - ml)/2,   mxs = (mr + ml)/2
- *             mya = (mt - mb)/2,   mys = (mt + mb)/2
+ * Face-midpoint traces (the perpendicular slope vanishes at a face midpoint):
+ *   right (ξ=+1,η=0): ρu = mxa+mxs, ρv = mya+mysx
+ *   left  (ξ=-1,η=0): ρu = mxa-mxs, ρv = mya-mysx
+ *   top   (ξ=0,η=+1): ρu = mxa+mxsy, ρv = mya+mys
+ *   bot   (ξ=0,η=-1): ρu = mxa-mxsy, ρv = mya-mys
+ *
+ *   Projection from the four face-midpoint normal fluxes (mr,ml,mt,mb) and the
+ *   two off-diagonal midpoint fluxes still needs the tangential midpoint values;
+ *   the IC kernels build all six modes directly from face-midpoint momenta.
  */
 
 /* g = 2 ghost-cell layers (needed for 3rd-order linear upwind stencil) */
@@ -81,15 +99,8 @@
  * Device helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Precision: default float; build with -DUSE_DOUBLE for the double-precision
- * variant (needed for clean low-Mach diagnostics, e.g. Gresho vortex). */
-#ifdef USE_DOUBLE
 #define real double
 #define reall double
-#else
-#define real float
-#define reall float
-#endif
 
 /* Computed in reall (double): the (E − ½ρu²) subtraction cancels at low Mach. */
 __device__ __forceinline__ real
@@ -358,16 +369,12 @@ hll_n(const real WL[4], const real WR[4],
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Apply boundary conditions
- *   qk_mode == 0 : periodic wrap in x and y (all original test cases)
- *   qk_mode == 1 : Quirk shock-duct — x-left Dirichlet post-shock,
- *                  x-right zero-gradient, y periodic.
- *                  qk_r2/qk_m2/qk_E2 = post-shock rho, x-momentum, E.
- * No sign flips: DOF values copied verbatim.
+ * Apply boundary conditions — periodic wrap
+ * Ghost layer (g=1): left ghost ← right interior edge, etc.
+ * No sign flips: DOF values copied verbatim (the ring wraps).
  * ═══════════════════════════════════════════════════════════════════════════ */
 __global__ void
-apply_bc(real * __restrict__ Qp, int N, int Np,
-         int qk_mode, real qk_r2, real qk_m2, real qk_E2)
+apply_bc(real * __restrict__ Qp, int N, int Np)
 {
     const int g   = G_GHOST;
     const int Np2 = Np * Np;
@@ -380,36 +387,43 @@ apply_bc(real * __restrict__ Qp, int N, int Np,
         bool gy = (jp < g || jp >= N + g);
         if (!gx && !gy) continue;  /* interior — skip */
 
-        /* y always periodic */
-        int jr = jp;
+        /* Periodic wrap: map ghost index to the opposite interior edge */
+        int ir = ip, jr = jp;
+        if (ip < g)      ir = ip + N;   /* left  ghost  ← right interior */
+        if (ip >= N + g) ir = ip - N;   /* right ghost  ← left  interior */
         if (jp < g)      jr = jp + N;   /* bottom ghost ← top   interior */
         if (jp >= N + g) jr = jp - N;   /* top    ghost ← bottom interior */
-
-        if (qk_mode && ip < g) {
-            /* left ghost: uniform post-shock inflow (all slopes zero) */
-            Qp[IDX_P(Q_RHO, jp, ip, Np)] = qk_r2;
-            Qp[IDX_P(Q_MXA, jp, ip, Np)] = qk_m2;
-            Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.;
-            Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.;
-            Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.;
-            Qp[IDX_P(Q_E,   jp, ip, Np)] = qk_E2;
-            continue;
-        }
-
-        int ir = ip;
-        if (qk_mode) {
-            /* right ghost: zero-gradient from last interior column */
-            if (ip >= N + g) ir = N + g - 1;
-        } else {
-            /* periodic wrap in x */
-            if (ip < g)      ir = ip + N;   /* left  ghost  ← right interior */
-            if (ip >= N + g) ir = ip - N;   /* right ghost  ← left  interior */
-        }
 
         for (int q = 0; q < NVAR; q++)
             Qp[IDX_P(q, jp, ip, Np)] = Qp[IDX_P(q, jr, ir, Np)];
     }
 }
+
+#ifdef NEDELEC
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Nédélec projection — restrict the full P1 momentum to the lowest-order
+ * (first-kind) Nédélec / curl-conforming subspace by zeroing the two
+ * DIVERGENCE slopes.  Leaves:
+ *     ρu = mxa + mxsy·η   (const in ξ, linear in η)
+ *     ρv = mya + mysx·ξ   (linear in ξ, const in η)
+ * i.e. the rotated RT0 element: div-free in-cell, carries vorticity
+ *     ω = (2/h)(mysx − mxsy),  tangential component continuous.
+ * Applied to the whole padded array after every BC fill so mxs≡mys≡0 holds
+ * in interior AND ghost cells for the next RHS evaluation. ─────────────── */
+__global__ void
+project_nedelec(real * __restrict__ Qp, int Np)
+{
+    const int Np2 = Np * Np;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < Np2;
+             idx += blockDim.x * gridDim.x) {
+        Qp[Q_MXS * Np2 + idx] = 0.;
+        Qp[Q_MYS * Np2 + idx] = 0.;
+    }
+}
+#define NEDELEC_PROJECT(Qarr) project_nedelec<<<GS_NBLK, BLOCK1D>>>((Qarr), Np)
+#else
+#define NEDELEC_PROJECT(Qarr) ((void)0)
+#endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Reconstruction slopes — select via #define below
@@ -589,58 +603,62 @@ __device__ inline real rec_hi_3(real ul, real uc, real ur)
 
 __device__ __forceinline__ void
 rhs_atomic_add(real * __restrict__ RHS, int N2, int k,
-               real drho, real dmxa, real dmxs,
-               real dmya, real dmys, real dE)
+               real drho, real dmxa, real dmxs, real dmxsy,
+               real dmya, real dmysx, real dmys, real dE)
 {
-    atomicAdd(&RHS[Q_RHO * N2 + k], drho);
-    atomicAdd(&RHS[Q_MXA * N2 + k], dmxa);
-    atomicAdd(&RHS[Q_MXS * N2 + k], dmxs);
-    atomicAdd(&RHS[Q_MYA * N2 + k], dmya);
-    atomicAdd(&RHS[Q_MYS * N2 + k], dmys);
-    atomicAdd(&RHS[Q_E   * N2 + k], dE);
+    atomicAdd(&RHS[Q_RHO  * N2 + k], drho);
+    atomicAdd(&RHS[Q_MXA  * N2 + k], dmxa);
+    atomicAdd(&RHS[Q_MXS  * N2 + k], dmxs);
+    atomicAdd(&RHS[Q_MXSY * N2 + k], dmxsy);
+    atomicAdd(&RHS[Q_MYA  * N2 + k], dmya);
+    atomicAdd(&RHS[Q_MYSX * N2 + k], dmysx);
+    atomicAdd(&RHS[Q_MYS  * N2 + k], dmys);
+    atomicAdd(&RHS[Q_E    * N2 + k], dE);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * RHS kernel — RT0/P0 DG
+ * RHS kernel — FULL-P1 momentum / P0 DG
  *
  * For each cell (i,j) [physical], padded index (ip,jp) = (i+g, j+g):
  *
- *   DOFs stored in modal form: ρ, mxa, mxs, mya, mys, E
- *   Reconstruct nodal face fluxes:
- *     mr = mxa+mxs,  ml = mxs-mxa,  mt = mya+mys,  mb = mys-mya
- *   Face velocities (Cartesian):
- *     Right face: u_n = (mxa+mxs)/ρ,  u_t = mya/ρ
- *     Left  face: u_n = (mxa-mxs)/ρ,  u_t = mya/ρ
- *     Top   face: v_n = (mya+mys)/ρ,  u_t = mxa/ρ
- *     Bot   face: v_n = (mya-mys)/ρ,  u_t = mxa/ρ
+ *   Momentum DOFs (modal): mxa,mxs,mxsy  (ρu = mxa+mxs·ξ+mxsy·η)
+ *                          mya,mysx,mys  (ρv = mya+mysx·ξ+mys·η)
+ *   Density/energy: P0 averages ρ, E.
  *
- *   HLLC at each face: F_R, F_L, G_T, G_B  [mass, x-mom, y-mom, energy]
+ *   FACE TRACES come from each cell's OWN P1 polynomial evaluated at the face
+ *   midpoint (a genuine DG-P1 trace):
+ *     Right face (ξ=+1,η=0): ρu = mxa+mxs (normal),  ρv = mya+mysx (tangential)
+ *     Top   face (ξ=0,η=+1): ρv = mya+mys (normal),  ρu = mxa+mxsy (tangential)
+ *   The perpendicular slope vanishes at the midpoint, so the NORMAL momentum
+ *   trace is identical to RT0 — only the TANGENTIAL momentum now carries an
+ *   in-cell slope (mysx on x-faces, mxsy on y-faces) instead of a reconstructed
+ *   neighbour slope.  Density and pressure keep the 3rd-order neighbour
+ *   reconstruction (they are P0).
  *
- *   P0 update (ρ, E):
- *     dρ/dt = -(1/h)[F_R[0] - F_L[0] + G_T[0] - G_B[0]]
- *     dE/dt = -(1/h)[F_R[3] - F_L[3] + G_T[3] - G_B[3]]
+ *   HLLC at each face: F_R, G_T  [mass, x-mom, y-mom, energy], scattered to both
+ *   adjacent cells so each face flux is built once.
  *
- *   RT0 momentum update via weak form + 2×2 Gauss volume integral:
- *     Gauss pts: ξ,η ∈ {-1/√3, +1/√3}, weight=1, |J|=(h/2)²
- *     T_xx(ξ,η) = qx(ξ)²/ρ + p,  qx(ξ) = mxa+mxs·ξ  (RT0)
- *     T_yy(ξ,η) = qy(η)²/ρ + p,  qy(η) = mya+mys·η  (RT0)
- *     vol_x = (h/4) Σ_{2×2} T_xx   [≡ (h/ρ)(mxa²+mxs²/3)+p·h for RT0/P0]
- *     vol_y = (h/4) Σ_{2×2} T_yy
- *     RHS_R = vol_x − F_R[1]·h − (G_T[1]-G_B[1])·h/2
- *     RHS_L = vol_x − F_L[1]·h + (G_T[1]-G_B[1])·h/2
- *     d(mxa) = (1/h²)·(RHS_R - RHS_L)        modal mode 0
- *     d(mxs) = (3/h²)·(RHS_R + RHS_L)        modal mode 1
- *     (similarly for mya, mys with vol_y and x-face y-mom fluxes)
+ *   Weak form → mass-matrix inverse per mode:
+ *     d(avg)  = (1/h²)·RHS_1 ,  d(ξ-slope)=d(η-slope)=(3/h²)·RHS_ξ,η
+ *   with RHS_a = ∫_K (F·∇φ_a) − ∮_∂K φ_a F_n.
  *
- *   Implementation: each thread adds its local volume term and evaluates only
- *   the right/top interfaces. Those face contributions are atomically
- *   scattered into both adjacent physical cells, so each face flux is built once.
+ *   Volume terms (analytic, from ∫∫ over [-1,1]²):
+ *     vol_x  = (1/h)∫ (ρu²+p)  = h[(mxa²+(mxs²+mxsy²)/3)/ρ + p]        → mxs
+ *     vol_y  = (1/h)∫ (ρv²+p)  = h[(mya²+(mysx²+mys²)/3)/ρ + p]        → mys
+ *     vol_xy = (1/h)∫ (ρuv)    = (h/ρ)(mxa·mya+(mxs·mysx+mxsy·mys)/3)  → mxsy,mysx
+ *   (the cross ρuv term feeds the off-diagonal slopes; pressure only enters the
+ *    diagonal vol_x/vol_y — the correct momentum-flux tensor structure.)
+ *
+ *   Face scatter (midpoint quadrature; a perpendicular face contributes 0 to a
+ *   slope whose basis is odd along that face):
+ *     x-face flux F_R → mxa(±), mxs(−3), mysx(−3, tangential-slope);   mxsy,mys 0
+ *     y-face flux G_T → mya(±), mys(−3), mxsy(−3, tangential-slope);   mxs,mysx 0
  * ═══════════════════════════════════════════════════════════════════════════ */
 __global__ void
 compute_rhs(const real * __restrict__ Qp,
             real       * __restrict__ RHS,
             real       * __restrict__ lam_out,
-            int N, int Np, real h, int qk_mode)
+            int N, int Np, real h)
 {
     const int g   = G_GHOST;
     const int N2  = N * N;
@@ -651,171 +669,158 @@ compute_rhs(const real * __restrict__ Qp,
         int jp = j + g, ip = i + g;
         int kR = j * N + ((i + 1 < N) ? (i + 1) : 0);
         int kT = ((j + 1 < N) ? (j + 1) : 0) * N + i;
-        /* qk (shock duct): x is NOT periodic — cell N-1's right face is the
-         * outflow boundary (flux applies to itself only, no wrap), and cell
-         * 0 additionally owns its LEFT (inflow) face, evaluated below.     */
-        int qk_outflow = (qk_mode && i + 1 == N);
-        int qk_inflow  = (qk_mode && i == 0);
 
-        /* ── Load center cell modal DOFs ──────────────────────────────── */
-        real rho = fmax(Qp[IDX_P(Q_RHO, jp, ip, Np)], 1e-14);
-        real mxa = Qp[IDX_P(Q_MXA, jp, ip, Np)];
-        real mxs = Qp[IDX_P(Q_MXS, jp, ip, Np)];
-        real mya = Qp[IDX_P(Q_MYA, jp, ip, Np)];
-        real mys = Qp[IDX_P(Q_MYS, jp, ip, Np)];
-        real E   = Qp[IDX_P(Q_E,   jp, ip, Np)];
-
-        real mr = mxa + mxs;   /* outward right-face normal flux ρu|_R  */
-        real mt = mya + mys;
+        /* ── Load center cell modal DOFs (full P1 momentum) ───────────── */
+        real rho  = fmax(Qp[IDX_P(Q_RHO,  jp, ip, Np)], 1e-14);
+        real mxa  = Qp[IDX_P(Q_MXA,  jp, ip, Np)];
+        real mxs  = Qp[IDX_P(Q_MXS,  jp, ip, Np)];
+        real mxsy = Qp[IDX_P(Q_MXSY, jp, ip, Np)];
+        real mya  = Qp[IDX_P(Q_MYA,  jp, ip, Np)];
+        real mysx = Qp[IDX_P(Q_MYSX, jp, ip, Np)];
+        real mys  = Qp[IDX_P(Q_MYS,  jp, ip, Np)];
+        real E    = Qp[IDX_P(Q_E,    jp, ip, Np)];
 
         real p       = pressure_from_rt0(rho, mxa, mya, E);
         real inv_rho = 1. / rho;
-        real u_c     = mxa * inv_rho;  /* cell-avg x-velocity */
-        real v_c     = mya * inv_rho;   /* cell-avg y-velocity */
 
-        /* ── Load ±1 RT0 neighbors (needed for face-normal velocities) ── */
-        real rhoR = fmax(Qp[IDX_P(Q_RHO, jp,   ip+1, Np)], 1e-14);
-        real mxa_R= Qp[IDX_P(Q_MXA, jp,   ip+1, Np)];
-        real mxs_R= Qp[IDX_P(Q_MXS, jp,   ip+1, Np)];
-        real mya_R= Qp[IDX_P(Q_MYA, jp,   ip+1, Np)];
-        real E_R  = Qp[IDX_P(Q_E,   jp,   ip+1, Np)];
+        /* ── Load ±1 neighbours.  Density/energy are P0 (used for the face
+         *    ρ,p reconstruction); the full P1 momentum slopes are needed so
+         *    the neighbour's own linear trace can be sampled at BOTH face
+         *    Gauss points (2-point rule). ────────────────────────────────── */
+        real rhoR  = fmax(Qp[IDX_P(Q_RHO,  jp,   ip+1, Np)], 1e-14);
+        real mxa_R = Qp[IDX_P(Q_MXA,  jp,   ip+1, Np)];
+        real mxs_R = Qp[IDX_P(Q_MXS,  jp,   ip+1, Np)];
+        real mxsy_R= Qp[IDX_P(Q_MXSY, jp,   ip+1, Np)];
+        real mya_R = Qp[IDX_P(Q_MYA,  jp,   ip+1, Np)];
+        real mysx_R= Qp[IDX_P(Q_MYSX, jp,   ip+1, Np)];
+        real mys_R = Qp[IDX_P(Q_MYS,  jp,   ip+1, Np)];
+        real E_R   = Qp[IDX_P(Q_E,    jp,   ip+1, Np)];
 
-        real rhoL = fmax(Qp[IDX_P(Q_RHO, jp,   ip-1, Np)], 1e-14);
-        real mxa_L= Qp[IDX_P(Q_MXA, jp,   ip-1, Np)];
-        real mya_L= Qp[IDX_P(Q_MYA, jp,   ip-1, Np)];
-        real E_L  = Qp[IDX_P(Q_E,   jp,   ip-1, Np)];
+        real rhoL  = fmax(Qp[IDX_P(Q_RHO,  jp,   ip-1, Np)], 1e-14);
+        real mxa_L = Qp[IDX_P(Q_MXA,  jp,   ip-1, Np)];
+        real mya_L = Qp[IDX_P(Q_MYA,  jp,   ip-1, Np)];
+        real E_L   = Qp[IDX_P(Q_E,    jp,   ip-1, Np)];
 
-        real rhoT = fmax(Qp[IDX_P(Q_RHO, jp+1, ip,   Np)], 1e-14);
-        real mxa_T= Qp[IDX_P(Q_MXA, jp+1, ip,   Np)];
-        real mya_T= Qp[IDX_P(Q_MYA, jp+1, ip,   Np)];
-        real mys_T= Qp[IDX_P(Q_MYS, jp+1, ip,   Np)];
-        real E_T  = Qp[IDX_P(Q_E,   jp+1, ip,   Np)];
+        real rhoT  = fmax(Qp[IDX_P(Q_RHO,  jp+1, ip,   Np)], 1e-14);
+        real mxa_T = Qp[IDX_P(Q_MXA,  jp+1, ip,   Np)];
+        real mxs_T = Qp[IDX_P(Q_MXS,  jp+1, ip,   Np)];
+        real mxsy_T= Qp[IDX_P(Q_MXSY, jp+1, ip,   Np)];
+        real mya_T = Qp[IDX_P(Q_MYA,  jp+1, ip,   Np)];
+        real mysx_T= Qp[IDX_P(Q_MYSX, jp+1, ip,   Np)];
+        real mys_T = Qp[IDX_P(Q_MYS,  jp+1, ip,   Np)];
+        real E_T   = Qp[IDX_P(Q_E,    jp+1, ip,   Np)];
 
-        real rhoBt= fmax(Qp[IDX_P(Q_RHO, jp-1, ip,   Np)], 1e-14);
-        real mxa_B= Qp[IDX_P(Q_MXA, jp-1, ip,   Np)];
-        real mya_B= Qp[IDX_P(Q_MYA, jp-1, ip,   Np)];
-        real E_B  = Qp[IDX_P(Q_E,   jp-1, ip,   Np)];
+        real rhoBt = fmax(Qp[IDX_P(Q_RHO,  jp-1, ip,   Np)], 1e-14);
+        real mxa_B = Qp[IDX_P(Q_MXA,  jp-1, ip,   Np)];
+        real mya_B = Qp[IDX_P(Q_MYA,  jp-1, ip,   Np)];
+        real E_B   = Qp[IDX_P(Q_E,    jp-1, ip,   Np)];
 
-        /* ── P0 primitives from ±1 (derived from already-loaded DOFs) ── */
+        /* ── P0 pressures from ±1 (for face density/pressure reconstruction) ── */
         real p_R  = pressure_from_rt0(rhoR,  mxa_R,  mya_R,  E_R);
         real p_L  = pressure_from_rt0(rhoL,  mxa_L,  mya_L,  E_L);
         real p_T  = pressure_from_rt0(rhoT,  mxa_T,  mya_T,  E_T);
         real p_B  = pressure_from_rt0(rhoBt, mxa_B,  mya_B,  E_B);
-        real vx1  = mya_L / rhoL;   /* y-vel at i-1 */
-        real Vx1  = mya_R / rhoR;   /* y-vel at i+1 */
-        real uy1  = mxa_B / rhoBt;  /* x-vel at j-1 */
-        real Uy1  = mxa_T / rhoT;   /* x-vel at j+1 */
 
-        /* ── Load ±2 cells for 3rd-order stencil ───────────────────── */
-#define LOAD3(rr_,pp_,tt_,jj_,ii_,tang_dof_) { \
+        /* ── Load ±2 cells: density/pressure only (3rd-order ρ,p recon) ── */
+#define LOAD3(rr_,pp_,jj_,ii_) { \
     real _r=fmax(Qp[IDX_P(Q_RHO,jj_,ii_,Np)],1e-14); \
     real _mx=Qp[IDX_P(Q_MXA,jj_,ii_,Np)]; \
     real _my=Qp[IDX_P(Q_MYA,jj_,ii_,Np)]; \
     real _E =Qp[IDX_P(Q_E,  jj_,ii_,Np)]; \
-    (rr_)=_r; (pp_)=pressure_from_rt0(_r,_mx,_my,_E); \
-    (tt_)=(tang_dof_)/_r; }
-        real Rx2,Px2,Vx2; LOAD3(Rx2,Px2,Vx2, jp,   ip+2, Qp[IDX_P(Q_MYA,jp,  ip+2,Np)])  /* i+2 */
-        real Ry2,Py2,Uy2; LOAD3(Ry2,Py2,Uy2, jp+2, ip,   Qp[IDX_P(Q_MXA,jp+2,ip,  Np)])  /* j+2 */
-
-        /* ── RIGHT face: between (i,j) and (i+1,j), normal = +x ─────── */
-        real WL_R[4] = {
-            rec_hi(rhoL, rho,  rhoR),
-            mr * inv_rho,                          /* RT0 normal, unchanged */
-            rec_hi(vx1,  v_c,  Vx1),               /* tangential v, 3rd-order */
-            rec_hi(p_L,  p,    p_R)};
-        real WR_R[4] = {
-            rec_lo(rho,  rhoR, Rx2),
-            (mxa_R - mxs_R) / rhoR,              /* RT0 normal, unchanged */
-            rec_lo(v_c,  Vx1,  Vx2),               /* tangential v, 3rd-order */
-            rec_lo(p,    p_R,  Px2)};
-        real FR[4]; riemann_n(WL_R, WR_R, 1., 0., FR);
-
-        /* ── TOP face: between (i,j) and (i,j+1), normal = +y ──────── */
-        real WL_T[4] = {
-            rec_hi(rhoBt, rho,  rhoT),
-            rec_hi(uy1,  u_c,  Uy1),               /* tangential u, 3rd-order */
-            mt * inv_rho,                          /* RT0 normal, unchanged */
-            rec_hi(p_B,   p,    p_T)};
-        real WR_T[4] = {
-            rec_lo(rho,   rhoT, Ry2),
-            rec_lo(u_c,  Uy1,  Uy2),               /* tangential u, 3rd-order */
-            (mya_T - mys_T) / rhoT,               /* RT0 normal, unchanged */
-            rec_lo(p,     p_T,  Py2) };
-        real GT[4]; riemann_n(WL_T, WR_T, 0., 1., GT);
+    (rr_)=_r; (pp_)=pressure_from_rt0(_r,_mx,_my,_E); }
+        real Rx2,Px2; LOAD3(Rx2,Px2, jp,   ip+2)  /* i+2 */
+        real Ry2,Py2; LOAD3(Ry2,Py2, jp+2, ip  )  /* j+2 */
 
         real inv_h = 1. / h;
         real inv_h2 = inv_h * inv_h;
+        real inv_rhoR = 1. / rhoR;
+        real inv_rhoT = 1. / rhoT;
+        const real GP = (real)0.577350269189625764;  /* 1/√3 : 2-pt Gauss node */
 
-        /* ── RT0 RHS volume term — analytic integrals ──────────────────
-         * For RT0: qx(ξ,η) = mxa + mxs·ξ, qy(ξ,η) = mya + mys·η.
-         * ∂Ψ_x/∂x = ±1/h, ∂Ψ_x/∂y = 0  →  vol_x = (1/h) ∫∫_K T_xx dA.
-         *
-         * ∫_{-1}^1 ∫_{-1}^1 (mxa + mxs·ξ)² dξ dη = 4·mxa² + (4/3)·mxs²
-         * With |J| = (h/2)² and the 1/h on the basis gradient:
-         *   vol_x = (1/h)·(h/2)²·[(4·mxa² + (4/3)·mxs²)/ρ + 4·p]
-         *         = h · [(mxa² + mxs²/3)/ρ + p]
-         * Same for vol_y with (mya, mys).                              */
-#ifdef SBP_COLLOC
-        /* 2-point LOBATTO COLLOCATION of the volume flux (nodes = face traces).
-         * vol_x = h·(f_L+f_R)/2 with f = q²/ρ + p at the nodes
-         *       = h·[(mxa² + mxs²)/ρ + p]   (coefficient 1, not 1/3).
-         * With this choice the weak form is ALGEBRAICALLY IDENTICAL to the
-         * strong-form SBP-SAT finite difference
-         *     du/dt = −D f(u) + M⁻¹B(f(u) − f*),   f* = HLLC SAT,
-         * with D=(1/h)[[−1,1],[−1,1]], B=diag(−1,1), M=(h/6)[[2,1],[1,2]]
-         * (dense-norm SBP: MD + DᵀM = B).  The default exact integration
-         * below differs only by the dealiasing term −4·mxs²/(ρh) in dmxs/dt. */
-        real vol_x = h * ((mxa*mxa + mxs*mxs) * inv_rho + p);
-        real vol_y = h * ((mya*mya + mys*mys) * inv_rho + p);
-#else
-        real vol_x = h * ((mxa*mxa + mxs*mxs * (1./3.)) * inv_rho + p);
-        real vol_y = h * ((mya*mya + mys*mys * (1./3.)) * inv_rho + p);
-#endif
-        rhs_atomic_add(RHS, N2, k,
-                   0., 0., 6. * inv_h2 * vol_x,
-                   0., 6. * inv_h2 * vol_y, 0.);
-
-        /* ── Shared-face contributions: evaluate once, scatter to both cells ── */
-        real fr0 = FR[0] * inv_h;
-        real fr1 = FR[1] * inv_h;
-        real fr2 = FR[2] * inv_h;
-        real fr3 = FR[3] * inv_h;
-        rhs_atomic_add(RHS, N2, k,
-                   -fr0, -fr1, -3. * fr1,
-                   -fr2, 0.,   -fr3);
-        if (!qk_outflow)   /* qk: right face of i=N-1 is outflow — no wrap */
-            rhs_atomic_add(RHS, N2, kR,
-                    fr0,  fr1, -3. * fr1,
-                    fr2, 0.,    fr3);
-
-        /* ── qk inflow face: LEFT face of cell i=0, owned by this cell ──
-         * WL = ghost (uniform post-shock, slopes 0 → trace = mxa_L);
-         * WR = this cell's left trace.  Scatter to k only (ghost has no RHS). */
-        if (qk_inflow) {
-            real WL_I[4] = { rhoL,
-                             mxa_L / rhoL,          /* ghost right trace (mxs=0) */
-                             vx1,                   /* ghost tangential v (=0)   */
-                             p_L };
-            real WR_I[4] = { rec_lo(rhoL, rho, rhoR),
-                             (mxa - mxs) * inv_rho, /* RT0 left trace            */
-                             rec_lo(vx1, v_c, Vx1),
-                             rec_lo(p_L, p,   p_R) };
-            real FI[4]; riemann_n(WL_I, WR_I, 1., 0., FI);
-            rhs_atomic_add(RHS, N2, k,
-                    FI[0] * inv_h,  FI[1] * inv_h, -3. * FI[1] * inv_h,
-                    FI[2] * inv_h,  0.,             FI[3] * inv_h);
+        /* ── RIGHT face (normal +x): 2-POINT GAUSS in the tangential coord η ──
+         * The full-P1 momentum varies linearly along the face, so the flux is
+         * NOT constant along it — 1-point midpoint would drop that variation
+         * (and zero the tangential-flux → perpendicular-slope coupling that the
+         * exactly-integrated volume term already contains).  Sample the Riemann
+         * flux at η = ∓1/√3 and build ∮φ_a F for φ_a ∈ {1(=ξ on this face), η}.
+         * ρ,p are P0 (constant along the face) → reconstructed once. */
+        real rhoLf = rec_hi(rhoL, rho,  rhoR);
+        real rhoRf = rec_lo(rho,  rhoR, Rx2);
+        real pLf   = rec_hi(p_L,  p,    p_R);
+        real pRf   = rec_lo(p,    p_R,  Px2);
+        real I0R[4] = {0.,0.,0.,0.};   /* ∮ 1·F ds  (= ∮ ξ·F, ξ=+1 here) */
+        real IeR[4] = {0.,0.,0.,0.};   /* ∮ η·F ds                       */
+#pragma unroll
+        for (int m = 0; m < 2; m++) {
+            real eta = (m == 0) ? -GP : GP;
+            real WL[4] = { rhoLf,
+                           (mxa + mxs + mxsy*eta) * inv_rho,      /* ρu trace, ξ=+1 */
+                           (mya + mysx + mys*eta) * inv_rho,      /* ρv trace, ξ=+1 */
+                           pLf };
+            real WR[4] = { rhoRf,
+                           (mxa_R - mxs_R + mxsy_R*eta) * inv_rhoR,  /* ρu trace, ξ=−1 */
+                           (mya_R - mysx_R + mys_R*eta) * inv_rhoR,  /* ρv trace, ξ=−1 */
+                           pRf };
+            real Fg[4]; riemann_n(WL, WR, 1., 0., Fg);
+            for (int q = 0; q < 4; q++) { I0R[q] += Fg[q]; IeR[q] += eta*Fg[q]; }
         }
+        for (int q = 0; q < 4; q++) { I0R[q] *= 0.5*h; IeR[q] *= 0.5*h; }
 
-        real gt0 = GT[0] * inv_h;
-        real gt1 = GT[1] * inv_h;
-        real gt2 = GT[2] * inv_h;
-        real gt3 = GT[3] * inv_h;
+        /* ── TOP face (normal +y): 2-POINT GAUSS in the tangential coord ξ ── */
+        real rhoTfb = rec_hi(rhoBt, rho,  rhoT);
+        real rhoTft = rec_lo(rho,   rhoT, Ry2);
+        real pTfb   = rec_hi(p_B,   p,    p_T);
+        real pTft   = rec_lo(p,     p_T,  Py2);
+        real I0T[4] = {0.,0.,0.,0.};   /* ∮ 1·G ds  (= ∮ η·G, η=+1 here) */
+        real JxT[4] = {0.,0.,0.,0.};   /* ∮ ξ·G ds                       */
+#pragma unroll
+        for (int m = 0; m < 2; m++) {
+            real xi = (m == 0) ? -GP : GP;
+            real WB[4] = { rhoTfb,
+                           (mxa + mxsy + mxs*xi) * inv_rho,       /* ρu trace, η=+1 */
+                           (mya + mys  + mysx*xi) * inv_rho,      /* ρv trace, η=+1 */
+                           pTfb };
+            real WT[4] = { rhoTft,
+                           (mxa_T - mxsy_T + mxs_T*xi) * inv_rhoT,  /* ρu trace, η=−1 */
+                           (mya_T - mys_T  + mysx_T*xi) * inv_rhoT, /* ρv trace, η=−1 */
+                           pTft };
+            real Gg[4]; riemann_n(WB, WT, 0., 1., Gg);
+            for (int q = 0; q < 4; q++) { I0T[q] += Gg[q]; JxT[q] += xi*Gg[q]; }
+        }
+        for (int q = 0; q < 4; q++) { I0T[q] *= 0.5*h; JxT[q] *= 0.5*h; }
+
+        /* ── P1 RHS volume terms — analytic integrals over [-1,1]² ──────
+         * qx = mxa+mxs·ξ+mxsy·η, qy = mya+mysx·ξ+mys·η, ρ,p piecewise const.
+         *   vol_x  = h[(mxa²+(mxs²+mxsy²)/3)/ρ + p]
+         *   vol_y  = h[(mya²+(mysx²+mys²)/3)/ρ + p]
+         *   vol_xy = (h/ρ)(mxa·mya + (mxs·mysx + mxsy·mys)/3)   (cross ρuv) */
+        real vol_x  = h * ((mxa*mxa + (mxs*mxs + mxsy*mxsy) * (1./3.)) * inv_rho + p);
+        real vol_y  = h * ((mya*mya + (mysx*mysx + mys*mys) * (1./3.)) * inv_rho + p);
+        real vol_xy = h * (mxa*mya + (mxs*mysx + mxsy*mys) * (1./3.)) * inv_rho;
         rhs_atomic_add(RHS, N2, k,
-                   -gt0, -gt1, 0.,
-                   -gt2, -3. * gt2, -gt3);
+                   0., 0., 6. * inv_h2 * vol_x, 6. * inv_h2 * vol_xy,
+                   0., 6. * inv_h2 * vol_xy, 6. * inv_h2 * vol_y, 0.);
+
+        /* ── x-face surface integrals → cells k (right face, ξ=+1) & kR (left, ξ=−1)
+         * avg modes ×(1/h²), slope modes ×(3/h²);  the η-moment IeR now feeds
+         * the tangential-slope modes (mxsy from x-mom flux, mys from y-mom flux)
+         * — exactly the coupling 1-point quadrature dropped. */
+        rhs_atomic_add(RHS, N2, k,
+                   -inv_h2*I0R[0], -inv_h2*I0R[1], -3.*inv_h2*I0R[1], -3.*inv_h2*IeR[1],
+                   -inv_h2*I0R[2], -3.*inv_h2*I0R[2], -3.*inv_h2*IeR[2], -inv_h2*I0R[3]);
+        rhs_atomic_add(RHS, N2, kR,
+                    inv_h2*I0R[0],  inv_h2*I0R[1], -3.*inv_h2*I0R[1],  3.*inv_h2*IeR[1],
+                    inv_h2*I0R[2], -3.*inv_h2*I0R[2],  3.*inv_h2*IeR[2],  inv_h2*I0R[3]);
+
+        /* ── y-face surface integrals → cells k (top face, η=+1) & kT (bottom, η=−1)
+         * JxT (ξ-moment) feeds the tangential-slope modes (mxs from x-mom flux,
+         * mysx from y-mom flux). */
+        rhs_atomic_add(RHS, N2, k,
+                   -inv_h2*I0T[0], -inv_h2*I0T[1], -3.*inv_h2*JxT[1], -3.*inv_h2*I0T[1],
+                   -inv_h2*I0T[2], -3.*inv_h2*JxT[2], -3.*inv_h2*I0T[2], -inv_h2*I0T[3]);
         rhs_atomic_add(RHS, N2, kT,
-                gt0,  gt1, 0.,
-                gt2, -3. * gt2,  gt3);
+                    inv_h2*I0T[0],  inv_h2*I0T[1],  3.*inv_h2*JxT[1], -3.*inv_h2*I0T[1],
+                    inv_h2*I0T[2],  3.*inv_h2*JxT[2], -3.*inv_h2*I0T[2],  inv_h2*I0T[3]);
 
         /* ── CFL spectral radius ─────────────────────────────────────── */
         real u_avg = mxa * inv_rho;
@@ -850,66 +855,15 @@ ic_kernel(real * __restrict__ Qp, int N, int Np, real h)
         real p   = 0.1   * (1. - phi) + 10.0 * phi;   /* 1.0 inside, 0.1   outside */
         real E   = p / (GAMMA_V - 1.);     /* zero velocity IC */
 
-        /* RT0 modal DOFs: zero velocity → all modes = 0 */
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.;
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.;
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.;
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.;
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * IC kernel — Quirk odd-even / carbuncle test (matches carb_fv_2d.cu)
- *
- * Planar Mach-M shock at x0, moving +x. Interface index staggered one cell
- * on odd rows; pre-shock density carries an odd-even + pseudo-random
- * perturbation (amplitude `pert`) to seed and symmetry-break the
- * odd-even decoupling mode.
- * RT0 momentum: ρu evaluated at face midpoints (post-shock value r2*u2 for
- * faces strictly inside the post-shock region, 0 otherwise); ρv ≡ 0.
- * ═══════════════════════════════════════════════════════════════════════════ */
-__device__ __forceinline__ real
-cell_hash(int i, int j)
-{
-    unsigned int x = (unsigned int)(i * 73856093) ^ (unsigned int)(j * 19349663);
-    x ^= x >> 13; x *= 0x85ebca6bu; x ^= x >> 16;
-    return (real)(x & 0xFFFFu) / (real)65536. - (real)0.5;
-}
-
-__global__ void
-ic_quirk(real * __restrict__ Qp, int N, int Np, real h,
-         real r1, real p1, real r2, real u2, real p2, real x0, real pert)
-{
-    const int g  = G_GHOST;
-    const int N2 = N * N;
-    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < N2;
-             k += blockDim.x * gridDim.x) {
-        int j = k / N, i = k % N;
-        int jp = j + g, ip = i + g;
-
-        int is = (int)(x0 * N + 0.5) + (j & 1);   /* interface cell index */
-
-        real rho, u, p;
-        if (i < is) { rho = r2; u = u2; p = p2; }             /* post-shock */
-        else {                                                 /* pre-shock  */
-            rho = r1 * (1. + pert * ((j & 1) ? 1. : -1.)
-                           + pert * cell_hash(i, j));
-            u = 0.; p = p1;
-        }
-        real E = p / (GAMMA_V - 1.) + 0.5 * rho * u * u;
-
-        /* RT0 x-momentum from nodal face values: face f post-shock iff f < is */
-        real qxR = (i + 1 < is) ? r2 * u2 : 0.;   /* right face x = (i+1)h */
-        real qxL = (i     < is) ? r2 * u2 : 0.;   /* left  face x = i·h    */
-
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (qxR + qxL);
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (qxR - qxL);
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.;
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.;
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        /* P1 modal DOFs: zero velocity → all momentum modes = 0 */
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.;
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.;
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.;
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.;
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.;
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.;
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
     }
 }
 
@@ -1239,19 +1193,22 @@ ic_vortex(real * __restrict__ Qp, int N, int Np, real h, real Ma)
         real rB, uB, vB, pB;
         vortex_exact(xc, j*h,     Ma, &rB, &uB, &vB, &pB);
 
-        /* DOF sign convention: outward normal flux */
-        real mr =  rR * uR;    /* right: +x outward */
-        real ml = -rL * uL;    /* left:  -x outward */
-        real mt =  rT * vT;    /* top:   +y outward */
-        real mb = -rB * vB;    /* bottom:-y outward */
+        /* Full-P1 projection from face-midpoint momenta.
+         * Normal:  q_x at right/left, q_y at top/bottom.
+         * Tangential: q_x at top/bottom (→mxsy), q_y at right/left (→mysx). */
+        real qxR = rR * uR,  qxL = rL * uL;     /* ρu at right/left  */
+        real qxT = rT * uT,  qxB = rB * uB;     /* ρu at top/bottom  */
+        real qyT = rT * vT,  qyB = rB * vB;     /* ρv at top/bottom  */
+        real qyR = rR * vR_d, qyL = rL * vL_d;  /* ρv at right/left  */
 
-        /* convert to modal form: avg = (mr-ml)/2, slope = (mr+ml)/2 */
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (mr - ml);
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (mr + ml);
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.5 * (mt - mb);
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.5 * (mt + mb);
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.5 * (qxR + qxL);
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.5 * (qxR - qxL);
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.5 * (qxT - qxB);
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.5 * (qyT + qyB);
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.5 * (qyR - qyL);
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.5 * (qyT - qyB);
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
         (void)pL; (void)pT; (void)pB;
     }
 }
@@ -1378,18 +1335,20 @@ ic_vortex_paper(real * __restrict__ Qp, int N, int Np,
         real rT, uT, vT,   pT;  vortex_paper_exact(xc,      (j+1)*h, u0, v0, &rT, &uT, &vT,   &pT);
         real rB, uB, vB,   pB;  vortex_paper_exact(xc,      j*h,     u0, v0, &rB, &uB, &vB,   &pB);
 
-        /* compute outward normal fluxes, then convert to modal */
-        real mr =  rR * uR;   /* right: +x outward */
-        real ml = -rL * uL;   /* left:  -x outward */
-        real mt =  rT * vT;   /* top:   +y outward */
-        real mb = -rB * vB;   /* bottom:-y outward */
+        /* Full-P1 projection from face-midpoint momenta */
+        real qxR = rR * uR,   qxL = rL * uL;    /* ρu at right/left */
+        real qxT = rT * uT,   qxB = rB * uB;    /* ρu at top/bottom */
+        real qyT = rT * vT,   qyB = rB * vB;    /* ρv at top/bottom */
+        real qyR = rR * vR_d, qyL = rL * vL_d;  /* ρv at right/left */
 
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (mr - ml);   /* cell avg */
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (mr + ml);   /* x-slope  */
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.5 * (mt - mb);   /* cell avg */
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.5 * (mt + mb);   /* y-slope  */
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.5 * (qxR + qxL);  /* cell avg     */
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.5 * (qxR - qxL);  /* x-mom x-slope */
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.5 * (qxT - qxB);  /* x-mom y-slope */
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.5 * (qyT + qyB);  /* cell avg     */
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.5 * (qyR - qyL);  /* y-mom x-slope */
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.5 * (qyT - qyB);  /* y-mom y-slope */
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
         (void)pL; (void)pT; (void)pB;
     }
 }
@@ -1498,26 +1457,32 @@ ic_kh(real * __restrict__ Qp, int N, int Np, real h, real Mkh)
         real p   = 1.;
         real E   = p / (GAMMA_V - 1.) + 0.5 * rho * (u*u + v*v);
 
-        /* compute outward normal fluxes at face midpoints, then modal */
-        real mr_kh =  rho * u;   /* right face: +x outward, same ρu as cell */
-        real ml_kh = -rho * u;   /* left  face: -x outward */
-
-        /* y-faces: ρ varies with y, v varies with x */
+        /* Full-P1 momentum projection from face-midpoint momenta.
+         * x-mom ρu = ρ(y)·Mkh·H(y)  varies with y  → mxs=0, mxsy from y-faces
+         * y-mom ρv = ρ(y)·δMa·sin(2πx) varies with x → mys from y-faces, mysx from x-faces */
         real ys_t = (j+1)*h - 1.0;
         real ys_b = j*h     - 1.0;
-        real rhoT = GAMMA_V + kh_H(ys_t) * rkh;
-        real rhoB = GAMMA_V + kh_H(ys_b) * rkh;
-        real vT   = del * Mkh * sin(2. * pi * xc);
-        real vB   = del * Mkh * sin(2. * pi * xc);
-        real mt_kh =  rhoT * vT;   /* top:    +y outward */
-        real mb_kh = -rhoB * vB;   /* bottom: -y outward */
+        real Ht   = kh_H(ys_t),  Hb = kh_H(ys_b);
+        real rhoT = GAMMA_V + Ht * rkh;
+        real rhoB = GAMMA_V + Hb * rkh;
 
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (mr_kh - ml_kh);   /* = rho*u */
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (mr_kh + ml_kh);   /* = 0     */
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.5 * (mt_kh - mb_kh);
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.5 * (mt_kh + mb_kh);
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        /* x-momentum at the four face midpoints */
+        real qxR = rho * u,          qxL = rho * u;                 /* y=yc → cell value */
+        real qxT = rhoT * (Mkh*Ht),  qxB = rhoB * (Mkh*Hb);         /* y-faces carry shear */
+        /* y-momentum at the four face midpoints (ρ at right/left = cell ρ(yc)) */
+        real vR  = del * Mkh * sin(2.*pi*((i+1)*h));
+        real vL  = del * Mkh * sin(2.*pi*( i   *h));
+        real qyR = rho * vR,         qyL = rho * vL;                /* x-faces carry sin(2πx) */
+        real qyT = rhoT * v,         qyB = rhoB * v;                /* v(xc) same top/bottom */
+
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.5 * (qxR + qxL);
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.5 * (qxR - qxL);   /* = 0 */
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.5 * (qxT - qxB);
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.5 * (qyT + qyB);
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.5 * (qyR - qyL);
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.5 * (qyT - qyB);
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
     }
 }
 
@@ -1568,20 +1533,24 @@ ic_dsl(real * __restrict__ Qp, int N, int Np, real h, real Mdsl)
         real p   = 1.;
         real E   = p / (GAMMA_V - 1.) + 0.5 * rho * (u*u + v*v);
 
-        /* x-faces: u depends on y only → same on left/right edge (midpoint yc) */
-        real mr =  rho * u;   /* right: +x outward */
-        real ml = -rho * u;   /* left : -x outward */
+        /* Full-P1 momentum projection from face-midpoint momenta.
+         * ρu = ρ·Ma·dsl_u(y)  varies with y  → mxs=0, mxsy from y-faces
+         * ρv = ρ·Ma·δ·sin(2πx) varies with x → mys=0, mysx from x-faces */
+        real qxR = rho * u,  qxL = rho * u;                            /* y=yc → cell value */
+        real qxT = rho * (Mdsl * dsl_u((j+1)*h));                      /* ρu at top    */
+        real qxB = rho * (Mdsl * dsl_u( j   *h));                      /* ρu at bottom */
+        real qyT = rho * v,  qyB = rho * v;                            /* x=xc → cell value */
+        real qyR = rho * (Mdsl * DSL_PERT * sin(2.*pi*((i+1)*h)));     /* ρv at right */
+        real qyL = rho * (Mdsl * DSL_PERT * sin(2.*pi*( i   *h)));     /* ρv at left  */
 
-        /* y-faces: v depends on x only → same on top/bottom edge (midpoint xc) */
-        real mt =  rho * v;   /* top   : +y outward */
-        real mb = -rho * v;   /* bottom: -y outward */
-
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (mr - ml);   /* = rho*u */
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (mr + ml);   /* = 0     */
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.5 * (mt - mb);   /* = rho*v */
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.5 * (mt + mb);   /* = 0     */
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.5 * (qxR + qxL);   /* = rho*u */
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.5 * (qxR - qxL);   /* = 0     */
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.5 * (qxT - qxB);
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.5 * (qyT + qyB);   /* = rho*v */
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.5 * (qyR - qyL);
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.5 * (qyT - qyB);   /* = 0     */
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
     }
 }
 
@@ -1654,29 +1623,32 @@ ic_lmv(real * __restrict__ Qp, int N, int Np, real h, real eps)
         lmv_exact(xc, yc, p0, &rho, &uc, &vc, &p);
         real E = p / (GAMMA_V - 1.) + 0.5 * rho * (uc*uc + vc*vc);
 
-        /* RT0 face-midpoint normal fluxes (ρ=1, so flux = velocity component) */
+        /* Face-midpoint momenta for the full-P1 projection (Gresho: ρ=1). */
         real rR, uR, vR, pR;  lmv_exact((i+1)*h, yc,     p0, &rR, &uR, &vR, &pR);
         real rL, uL, vL, pL;  lmv_exact( i   *h, yc,     p0, &rL, &uL, &vL, &pL);
         real rT, uT, vT, pT;  lmv_exact(xc,     (j+1)*h, p0, &rT, &uT, &vT, &pT);
         real rB, uB, vB, pB;  lmv_exact(xc,      j   *h, p0, &rB, &uB, &vB, &pB);
 
-        real mr =  rR * uR;
-        real ml = -rL * uL;
-        real mt =  rT * vT;
-        real mb = -rB * vB;
+        real qxR = rR * uR, qxL = rL * uL;   /* ρu at right/left */
+        real qxT = rT * uT, qxB = rB * uB;   /* ρu at top/bottom */
+        real qyT = rT * vT, qyB = rB * vB;   /* ρv at top/bottom */
+        real qyR = rR * vR, qyL = rL * vL;   /* ρv at right/left */
 
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (mr - ml);
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (mr + ml);
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.5 * (mt - mb);
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.5 * (mt + mb);
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.5 * (qxR + qxL);
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.5 * (qxR - qxL);
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.5 * (qxT - qxB);
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.5 * (qyT + qyB);
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.5 * (qyR - qyL);
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.5 * (qyT - qyB);
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
         (void)pL; (void)pT; (void)pB; (void)pR;
     }
 }
 
 /* L2 error vs. exact stationary low-Mach vortex (exact = IC).
- * Also reports the VELOCITY error — the primary preservation diagnostic. */
+ * Reports ρ, p, and VELOCITY error — the velocity field is the primary
+ * quantity a low-Mach vortex scheme must preserve. */
 __global__ void
 compute_l2_err_lmv(const real * __restrict__ Qp,
                    real * __restrict__ err_rho,
@@ -1696,14 +1668,14 @@ compute_l2_err_lmv(const real * __restrict__ Qp,
         real rho_ex, u_ex, v_ex, p_ex;
         lmv_exact(xc, yc, p0, &rho_ex, &u_ex, &v_ex, &p_ex);
 
-        real rho = Qp[IDX_P(Q_RHO, jp, ip, Np)];
+        real rho = fmax(Qp[IDX_P(Q_RHO, jp, ip, Np)], 1e-14);
         real mxa = Qp[IDX_P(Q_MXA, jp, ip, Np)];
         real mya = Qp[IDX_P(Q_MYA, jp, ip, Np)];
         real E   = Qp[IDX_P(Q_E,   jp, ip, Np)];
         real p   = pressure_from_rt0(rho, mxa, mya, E);
 
-        real u = mxa / fmax(rho, (real)1e-14), v = mya / fmax(rho, (real)1e-14);
-        real du = u - u_ex, dv = v - v_ex;
+        real u = mxa / rho, v = mya / rho;   /* cell-average velocity */
+        real du = u - u_ex,  dv = v - v_ex;
         real dr = rho - rho_ex, dp = p - p_ex;
         err_rho[k] = dr * dr * h * h;
         err_p  [k] = dp * dp * h * h;
@@ -1837,12 +1809,22 @@ ic_vacwav(real * __restrict__ Qp, int N, int Np, real h, real Mref)
         vacwav_vortex(xc, j*h, Mref, &drv_b, &duv_b, &dvv_b, &dpv_b);
         real mb = -(fmax(1.+drv_b, 1e-14) * dvv_b);
 
-        Qp[IDX_P(Q_RHO, jp, ip, Np)] = rho;
-        Qp[IDX_P(Q_MXA, jp, ip, Np)] = 0.5 * (mr - ml);
-        Qp[IDX_P(Q_MXS, jp, ip, Np)] = 0.5 * (mr + ml);
-        Qp[IDX_P(Q_MYA, jp, ip, Np)] = 0.5 * (mt - mb);
-        Qp[IDX_P(Q_MYS, jp, ip, Np)] = 0.5 * (mt + mb);
-        Qp[IDX_P(Q_E,   jp, ip, Np)] = E;
+        /* Extra P1 slopes: tangential-momentum variation across the cell.
+         * The acoustic wave depends on x only, so at the y-faces (x=xc) it
+         * equals the cell-centre wave (drho_w, du_w). */
+        real qyR = fmax(1.+drv_r+drw_r, 1e-14) * dvv_r;   /* ρv at right */
+        real qyL = fmax(1.+drv_l+drw_l, 1e-14) * dvv_l;   /* ρv at left  */
+        real qxT = fmax(1.+drv_t+drho_w, 1e-14) * (duv_t + du_w);  /* ρu at top    */
+        real qxB = fmax(1.+drv_b+drho_w, 1e-14) * (duv_b + du_w);  /* ρu at bottom */
+
+        Qp[IDX_P(Q_RHO,  jp, ip, Np)] = rho;
+        Qp[IDX_P(Q_MXA,  jp, ip, Np)] = 0.5 * (mr - ml);
+        Qp[IDX_P(Q_MXS,  jp, ip, Np)] = 0.5 * (mr + ml);
+        Qp[IDX_P(Q_MXSY, jp, ip, Np)] = 0.5 * (qxT - qxB);
+        Qp[IDX_P(Q_MYA,  jp, ip, Np)] = 0.5 * (mt - mb);
+        Qp[IDX_P(Q_MYSX, jp, ip, Np)] = 0.5 * (qyR - qyL);
+        Qp[IDX_P(Q_MYS,  jp, ip, Np)] = 0.5 * (mt + mb);
+        Qp[IDX_P(Q_E,    jp, ip, Np)] = E;
     }
 }
 
@@ -2123,8 +2105,6 @@ write_png_1panel(const char *fname,
  *                            (Coiffier 2025, Sec 6.6.3, default Mref=0.1)
  *   ./rt_dg N lmv [eps]    Low-Mach vortex (Barsukow et al. Sec 2, default eps=0.1)
  *                            Stationary vortex; Mach set via p0=1/(γε²)-1/2
- *   ./rt_dg N qk [Mach]    Quirk odd-even / carbuncle test (default Mach=6)
- *                            planar shock duct; diagnostics: max|v|, sawtooth
  * ═══════════════════════════════════════════════════════════════════════════ */
 int main(int argc, char **argv)
 {
@@ -2139,13 +2119,11 @@ int main(int argc, char **argv)
     int do_dsl          = 0;  /* dsl: doubly periodic shear layer (BCG 1989) */
     int do_vacwav       = 0;
     int do_lmv          = 0;  /* lmv: low-Mach vortex (Barsukow Sec 2) */
-    int do_qk           = 0;  /* qk: Quirk odd-even / carbuncle test */
     int pv_moving       = 0;  /* 1 → pvmove: u0=v0=1, tf=10 */
     real kh_mach       = 0.01; /* KH convective Mach number */
     real dsl_mach      = 0.1;  /* shear-layer Mach number */
     real va_mach       = 0.1;  /* vortex-acoustic reference Mach number */
     real lmv_eps       = 0.1;  /* low-Mach vortex Mach number */
-    real qk_mach       = 6.;   /* Quirk shock Mach number */
 
     /* Check string modes first, then fall back to numeric Ma */
     if (strcmp(mode_str, "pv") == 0) {
@@ -2185,14 +2163,6 @@ int main(int argc, char **argv)
             if (endp != argv[3] && *endp == '\0' && maybe > 0.)
                 lmv_eps = maybe;
         }
-    } else if (strcmp(mode_str, "qk") == 0) {
-        do_qk = 1;
-        if (argc > 3) {
-            char *endp;
-            real maybe = strtod(argv[3], &endp);
-            if (endp != argv[3] && *endp == '\0' && maybe > 1.)
-                qk_mach = maybe;
-        }
     } else {
         /* Legacy: numeric Ma for original vortex */
         char *endp;
@@ -2205,18 +2175,7 @@ int main(int argc, char **argv)
 
     /* Sod = the fallback mode (no other test selected) */
     int do_sod = !(do_vortex || do_paper_vortex || do_kh ||
-                   do_dsl || do_vacwav || do_lmv || do_qk);
-
-    /* Quirk post-shock state (Rankine-Hugoniot; pre-shock rho1=1.4, p1=1, c1=1) */
-    const real qk_r1 = 1.4, qk_p1 = 1.0;
-    const real qk_r2 = qk_r1 * ((GAMMA_V+1.)*qk_mach*qk_mach)
-                             / ((GAMMA_V-1.)*qk_mach*qk_mach + 2.);
-    const real qk_p2 = qk_p1 * (2.*GAMMA_V*qk_mach*qk_mach - (GAMMA_V-1.))
-                             / (GAMMA_V+1.);
-    const real qk_u2 = qk_mach * (1. - qk_r1/qk_r2);
-    const real qk_m2 = qk_r2 * qk_u2;
-    const real qk_E2 = qk_p2/(GAMMA_V-1.) + 0.5*qk_r2*qk_u2*qk_u2;
-    const real qk_x0 = 0.1, qk_pert = 1e-3;
+                   do_dsl || do_vacwav || do_lmv);
 
     /* Domain size and run time per mode */
     real L_domain = 1.;           /* default: [0,1]^2 */
@@ -2224,7 +2183,7 @@ int main(int argc, char **argv)
     if (do_kh)           L_domain =  2.;
     /* dsl, lmv, vacwav: [0,1]^2 — L_domain stays 1 */
 
-    real CFL   = 0.35;
+    real CFL   = 0.15;
     real t_end;
     if (do_vortex) {
         /* One full vortex orbital period: T = 2πR / |u|_max = 2πR / Ma
@@ -2240,8 +2199,6 @@ int main(int argc, char **argv)
     else if (do_vacwav)  t_end = 3.5;
     /* t_end for LMV: one full vortex period T = 2π*0.2 / 1.0 ≈ 1.257 */
     else if (do_lmv)     t_end = 2. * (real)M_PI * 0.2;
-    /* t_end for QK: shock travels x0=0.1 → ~0.85 at speed Mach (c1=1) */
-    else if (do_qk)      t_end = 0.75 / qk_mach;
     else                 t_end = 1.0;   /* Sod */
 
     real h    = L_domain / N;
@@ -2259,27 +2216,28 @@ int main(int argc, char **argv)
     printf("========================================================\n");
     printf("  Device  : %s\n", prop.name);
     if (do_vortex)
-        printf("  RT0/P0 DG + HLLC  --  Isentropic Vortex  Ma=%.3f\n", Ma);
+        printf("  P1/P0 DG + HLLC  --  Isentropic Vortex  Ma=%.3f\n", Ma);
     else if (do_paper_vortex)
-        printf("  RT0/P0 DG + HLLC  --  Paper Isentropic Vortex  [0,10]^2  %s\n",
+        printf("  P1/P0 DG + HLLC  --  Paper Isentropic Vortex  [0,10]^2  %s\n",
                pv_moving ? "MOVING (u0=v0=1)" : "STATIONARY");
     else if (do_kh)
-        printf("  RT0/P0 DG + HLLC  --  Kelvin-Helmholtz  Ma=0.01  [0,2]^2\n");
+        printf("  P1/P0 DG + HLLC  --  Kelvin-Helmholtz  Ma=0.01  [0,2]^2\n");
     else if (do_dsl)
-        printf("  RT0/P0 DG + HLLC  --  Doubly Periodic Shear Layer  Ma=%.3f  [0,1]^2\n", dsl_mach);
+        printf("  P1/P0 DG + HLLC  --  Doubly Periodic Shear Layer  Ma=%.3f  [0,1]^2\n", dsl_mach);
     else if (do_vacwav)
-        printf("  RT0/P0 DG + HLLC  --  Vortex-Acoustic Wave  Mref=%.3f  [0,1]^2\n", va_mach);
+        printf("  P1/P0 DG + HLLC  --  Vortex-Acoustic Wave  Mref=%.3f  [0,1]^2\n", va_mach);
     else if (do_lmv)
-        printf("  RT0/P0 DG + HLLC  --  Low-Mach Vortex  eps=%.4f  [0,1]^2\n", lmv_eps);
-    else if (do_qk)
-        printf("  RT0/P0 DG + HLLC  --  Quirk odd-even/carbuncle  Mach=%.1f  [0,1]^2\n"
-               "  post-shock: rho2=%.4f u2=%.4f p2=%.4f   pert=%.0e\n",
-               qk_mach, qk_r2, qk_u2, qk_p2, qk_pert);
+        printf("  P1/P0 DG + HLLC  --  Low-Mach Vortex  eps=%.4f  [0,1]^2\n", lmv_eps);
     else
-        printf("  RT0/P0 DG + HLLC  --  Circular Sod  (no AV)\n");
+        printf("  P1/P0 DG + HLLC  --  Circular Sod  (no AV)\n");
     printf("  N=%dx%d  Np=%d  h=%.5f  L=%.1f  CFL=%.2f  t_end=%.3f\n",
            N, N, Np, h, L_domain, CFL, t_end);
-    printf("  DOFs: rho(P0) + m_R,m_L,m_T,m_B(RT0) + E(P0)  per cell\n");
+#ifdef NEDELEC
+    printf("  DOFs: rho(P0) + [mxa,mxsy, mya,mysx](NEDELEC / curl-conforming momentum) + E(P0)  [DOUBLE]\n");
+    printf("  >> Nedelec subspace: mxs=mys=0  (div-free in-cell, carries vorticity)\n");
+#else
+    printf("  DOFs: rho(P0) + [mxa,mxs,mxsy, mya,mysx,mys](full-P1 momentum) + E(P0)  per cell  [DOUBLE precision]\n");
+#endif
     printf("========================================================\n");
 
     size_t sz1  = (size_t)N  * N  * sizeof(real);
@@ -2309,20 +2267,19 @@ int main(int argc, char **argv)
     /* Color ranges — all cases use data-driven bounds computed from IC */
     real RHO_MIN = 0., RHO_MAX = 0., P_MIN = 0., P_MAX = 0.;
     static char _lmv_buf[32];
-    snprintf(_lmv_buf, sizeof(_lmv_buf), "rt_lmv%04d", (int)round(lmv_eps*10000));
+    snprintf(_lmv_buf, sizeof(_lmv_buf), "p1_lmv%04d", (int)round(lmv_eps*10000));
     static char _va_buf[32];
-    snprintf(_va_buf, sizeof(_va_buf), "rt_va%04d", (int)round(va_mach*10000));
+    snprintf(_va_buf, sizeof(_va_buf), "p1_va%04d", (int)round(va_mach*10000));
     static char _kh_buf[32];
-    snprintf(_kh_buf, sizeof(_kh_buf), "rt_kh%03d", (int)round(kh_mach*1000));
+    snprintf(_kh_buf, sizeof(_kh_buf), "p1_kh%03d", (int)round(kh_mach*1000));
     static char _dsl_buf[32];
-    snprintf(_dsl_buf, sizeof(_dsl_buf), "rt_dsl%03d", (int)round(dsl_mach*1000));
-    const char *prefix = do_vortex       ? "rt_vortex"  :
-                         do_paper_vortex ? "rt_pvortex" :
+    snprintf(_dsl_buf, sizeof(_dsl_buf), "p1_dsl%03d", (int)round(dsl_mach*1000));
+    const char *prefix = do_vortex       ? "p1_vortex"  :
+                         do_paper_vortex ? "p1_pvortex" :
                          do_vacwav       ? _va_buf :
                          do_kh           ? _kh_buf :
                          do_dsl          ? _dsl_buf :
-                         do_qk           ? "rt_qk" :
-                         do_lmv          ? _lmv_buf : "rt_sod";
+                         do_lmv          ? _lmv_buf : "p1_sod";
 
     /* Helper: compute and print L2 errors (rho, rho*u, rho*v, rho*E — matches paper Tables 2 & 3) */
 #define PRINT_L2_ERR() do { \
@@ -2366,7 +2323,7 @@ int main(int argc, char **argv)
     } else { \
     if (do_dsl) \
         extract_vort  <<<GS_NBLK,BLOCK1D>>>(d_U, d_rho_out, d_p_out, N, Np, h); \
-    else if (do_kh || do_qk) \
+    else if (do_kh) \
         extract_rho_v <<<GS_NBLK,BLOCK1D>>>(d_U, d_rho_out, d_p_out, N, Np); \
     else if (do_lmv) \
         extract_magv_p<<<GS_NBLK,BLOCK1D>>>(d_U, d_rho_out, d_p_out, N, Np); \
@@ -2387,19 +2344,6 @@ int main(int argc, char **argv)
     } \
     CK(cudaMemcpy(h_rho, d_rho_out, sz1, cudaMemcpyDeviceToHost)); \
     CK(cudaMemcpy(h_p,   d_p_out,   sz1, cudaMemcpyDeviceToHost)); \
-    if (do_qk) { /* carbuncle diagnostics: max|v| + odd-even density sawtooth */ \
-        real _vmax = 0., _saw = 0.; \
-        for (int _j = 0; _j < N; _j++) { \
-            int _jm = (_j == 0) ? N-1 : _j-1, _jp2 = (_j == N-1) ? 0 : _j+1; \
-            for (int _i = 0; _i < N; _i++) { \
-                real _av = fabs(h_p[_j*N+_i]); \
-                if (_av > _vmax) _vmax = _av; \
-                real _s = fabs(h_rho[_j*N+_i] \
-                        - 0.5*(h_rho[_jm*N+_i] + h_rho[_jp2*N+_i])); \
-                if (_s > _saw) _saw = _s; } } \
-        printf("    max|v|=%.4e (u2=%.3f)  sawtooth=%.4e (rho2=%.3f)\n", \
-               _vmax, qk_u2, _saw, qk_r2); \
-    } \
     char _fn[64]; sprintf(_fn, "figures/%s_%04d.png", prefix, (idx)); \
     write_png_2panel(_fn, h_rho, _rlo, _rhi, \
                           h_p,   _plo, _phi, N, do_sod); \
@@ -2420,13 +2364,10 @@ int main(int argc, char **argv)
         ic_vacwav      <<<GS_NBLK, BLOCK1D>>>(d_U, N, Np, h, va_mach);
     else if (do_lmv)
         ic_lmv         <<<GS_NBLK, BLOCK1D>>>(d_U, N, Np, h, lmv_eps);
-    else if (do_qk)
-        ic_quirk       <<<GS_NBLK, BLOCK1D>>>(d_U, N, Np, h,
-                                              qk_r1, qk_p1, qk_r2, qk_u2,
-                                              qk_p2, qk_x0, qk_pert);
     else
         ic_kernel      <<<GS_NBLK, BLOCK1D>>>(d_U, N, Np, h);
-    apply_bc  <<<GS_NBLK, BLOCK1D>>>(d_U, N, Np, do_qk, qk_r2, qk_m2, qk_E2);
+    apply_bc  <<<GS_NBLK, BLOCK1D>>>(d_U, N, Np);
+    NEDELEC_PROJECT(d_U);   /* project IC onto Nédélec subspace (no-op if !NEDELEC) */
     CK(cudaDeviceSynchronize());
 
     /* Compute data-driven color bounds from IC for all cases */
@@ -2443,7 +2384,7 @@ int main(int argc, char **argv)
         } else {
             if (do_dsl)
                 extract_vort<<<GS_NBLK, BLOCK1D>>>(d_U, d_rho_out, d_p_out, N, Np, h);
-            else if (do_kh || do_qk)
+            else if (do_kh)
                 extract_rho_v<<<GS_NBLK, BLOCK1D>>>(d_U, d_rho_out, d_p_out, N, Np);
             else if (do_sod)
                 extract_rho_vort<<<GS_NBLK, BLOCK1D>>>(d_U, d_rho_out, d_p_out, N, Np, h);
@@ -2470,7 +2411,7 @@ int main(int argc, char **argv)
 
     /* precompute RHS for first step */
     CK(cudaMemset(d_RHS, 0, sz6));
-    compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U, d_RHS, d_lam, N, Np, h, do_qk);
+    compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U, d_RHS, d_lam, N, Np, h);
     CK(cudaDeviceSynchronize());
     real lam_max = gpu_max(d_lam, d_tmp, N*N);
 
@@ -2495,23 +2436,26 @@ int main(int argc, char **argv)
 
         /* stage 1 */
         rk3_s1<<<GS_NBLK, BLOCK1D>>>(d_U1, d_U0, d_RHS, dt, N, Np);
-        apply_bc<<<GS_NBLK, BLOCK1D>>>(d_U1, N, Np, do_qk, qk_r2, qk_m2, qk_E2);
+        apply_bc<<<GS_NBLK, BLOCK1D>>>(d_U1, N, Np);
+        NEDELEC_PROJECT(d_U1);
 
         /* stage 2 */
         CK(cudaMemset(d_RHS, 0, sz6));
-        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U1, d_RHS, d_lam, N, Np, h, do_qk);
+        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U1, d_RHS, d_lam, N, Np, h);
         rk3_s2<<<GS_NBLK, BLOCK1D>>>(d_U2, d_U0, d_U1, d_RHS, dt, N, Np);
-        apply_bc<<<GS_NBLK, BLOCK1D>>>(d_U2, N, Np, do_qk, qk_r2, qk_m2, qk_E2);
+        apply_bc<<<GS_NBLK, BLOCK1D>>>(d_U2, N, Np);
+        NEDELEC_PROJECT(d_U2);
 
         /* stage 3 */
         CK(cudaMemset(d_RHS, 0, sz6));
-        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U2, d_RHS, d_lam, N, Np, h, do_qk);
+        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U2, d_RHS, d_lam, N, Np, h);
         rk3_s3<<<GS_NBLK, BLOCK1D>>>(d_U, d_U0, d_U2, d_RHS, dt, N, Np);
-        apply_bc<<<GS_NBLK, BLOCK1D>>>(d_U, N, Np, do_qk, qk_r2, qk_m2, qk_E2);
+        apply_bc<<<GS_NBLK, BLOCK1D>>>(d_U, N, Np);
+        NEDELEC_PROJECT(d_U);
 
         /* update RHS and lam for next step */
         CK(cudaMemset(d_RHS, 0, sz6));
-        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U, d_RHS, d_lam, N, Np, h, do_qk);
+        compute_rhs<<<GS_NBLK, BLOCK1D>>>(d_U, d_RHS, d_lam, N, Np, h);
         lam_max = gpu_max(d_lam, d_tmp, N*N);
         if (!(lam_max > 0.)) { fprintf(stderr, "blow-up step %d\n", step); break; }
 
