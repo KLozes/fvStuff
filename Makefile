@@ -6,9 +6,9 @@ ARCH    = native
 CFLAGS  = -O3 -arch=$(ARCH) --expt-relaxed-constexpr
 LIBS    = -lm
 
-.PHONY: all clean run run_fr run_rt run_p1 run_ned run_sbp run_carb run_keep run_keep_lmv
+.PHONY: all clean run run_fr run_dgsem run_rt run_p1 run_q1 run_ned run_sbp run_carb run_keep run_keep_lmv
 
-all: $(TARGET) fr_lob rt_dg rt_dg_dbl sbp_dg p1_dg ned_dg dg1 keep_fv
+all: $(TARGET) fr_lob dgsem rt_dg rt_dg_dbl sbp_dg p1_dg q1_dg ned_dg dg1 keep_fv
 
 $(TARGET): $(SRC)
 	$(NVCC) $(CFLAGS) -o $@ $< $(LIBS)
@@ -26,6 +26,17 @@ fr_lob: $(FR_SRC)
 
 run_fr: fr_lob
 	./fr_lob 50
+
+DGSEM_SRC = dgsem_lobatto_2d.cu
+
+# Nodal DG Spectral Element Method (DGSEM) on LGL/Lobatto nodes.
+# Genuine strong-form DG (not spectral difference).  Set DGSEM_ORDER=1..3.
+DGSEM_ORDER ?= 3
+dgsem: $(DGSEM_SRC)
+	$(NVCC) $(CFLAGS) -DORDER=$(DGSEM_ORDER) -o $@ $< $(LIBS)
+
+run_dgsem: dgsem
+	./dgsem 50
 
 RT_SRC = rt_dg_euler_2d.cu
 
@@ -50,6 +61,7 @@ run_sbp: sbp_dg
 	./sbp_dg 100 lmv 0.1
 
 P1_SRC = p1_dg_euler_2d.cu
+Q1_SRC = q1_dg_euler_2d.cu
 
 # FULL-LINEAR (P1) momentum / P0 mixed DG — DOUBLE precision.
 # Experiment: does full P1 momentum keep low-Mach preservation like RT0?
@@ -59,6 +71,13 @@ p1_dg: $(P1_SRC)
 # Gresho / low-Mach vortex in double precision
 run_p1: p1_dg
 	./p1_dg 100 lmv 0.1
+
+# FULL BILINEAR Q1 DG — all fields {1,x,y,xy}, compact Hermite face recon. DOUBLE.
+q1_dg: $(Q1_SRC)
+	$(NVCC) $(CFLAGS) -o $@ $< $(LIBS)
+
+run_q1: q1_dg
+	./q1_dg 200
 
 # NEDELEC (curl-conforming / rotated-RT0) momentum: same source, -DNEDELEC
 # projects out the divergence slopes (mxs=mys=0) → div-free, vorticity-carrying.
@@ -104,4 +123,4 @@ run_keep_lmv: keep_fv
 	./keep_fv 200 lmv 0.1
 
 clean:
-	rm -f $(TARGET) fr_lob rt_dg rt_dg_dbl sbp_dg p1_dg ned_dg carb_fv carb_fv_hll dg1 keep_fv sod_*.ppm fr_sod_*.ppm
+	rm -f $(TARGET) fr_lob dgsem rt_dg rt_dg_dbl sbp_dg p1_dg q1_dg ned_dg carb_fv carb_fv_hll dg1 keep_fv sod_*.ppm fr_sod_*.ppm dgsem_sod_*.ppm dgsem_sensor_*.ppm
